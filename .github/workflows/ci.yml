@@ -13,6 +13,31 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Decides whether the integration tests are needed: they are skipped only
+  # when a pull request changes nothing but documentation. A job skipped by a
+  # condition reports success, so the required check still passes.
+  changes:
+    name: Changes
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: read
+    outputs:
+      code: ${{ steps.files.outputs.code }}
+    steps:
+      - id: files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -z "$PR" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --paginate --jq '.[].filename')
+          echo "$files"
+          code=$(echo "$files" | grep -Evx '.*\.md|LICENSE|\.github/dependabot\.yml' >/dev/null && echo true || echo false)
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
   test:
     name: Test (${{ matrix.arch }})
     strategy:
@@ -48,6 +73,8 @@ jobs:
 
   integration:
     name: Integration
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
