@@ -46,4 +46,19 @@ RUN apt-get update \
       iputils-ping \
       netcat-openbsd \
  && rm -rf /var/lib/apt/lists/*
+
+# yq v4 (mikefarah), as on GitHub-hosted runners; Ubuntu's yq package is a
+# different tool. Verified against the release's SHA-256 checksum.
+RUN arch=$(dpkg --print-architecture) \
+ && url=https://github.com/mikefarah/yq/releases/latest/download \
+ && tmp=$(mktemp -d) \
+ && curl -fsSL -o "$tmp/yq_linux_$arch" "$url/yq_linux_$arch" \
+ && curl -fsSL -o "$tmp/checksums" "$url/checksums" \
+ && curl -fsSL -o "$tmp/order" "$url/checksums_hashes_order" \
+ && col=$(( $(grep -nx 'SHA-256' "$tmp/order" | cut -d: -f1) + 1 )) \
+ && sum=$(awk -v f="yq_linux_$arch" -v c="$col" '$1 == f { print $c }' "$tmp/checksums") \
+ && [ -n "$sum" ] \
+ && echo "$sum  $tmp/yq_linux_$arch" | sha256sum -c - \
+ && install -m 0755 "$tmp/yq_linux_$arch" /usr/local/bin/yq \
+ && rm -rf "$tmp"
 USER runner
