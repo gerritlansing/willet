@@ -5,26 +5,38 @@ A GitHub Actions [runner scale set](https://github.com/actions/scaleset) that ru
 It works like [actions-runner-controller](https://github.com/actions/actions-runner-controller), but runs on a single Linux host with KVM instead of Kubernetes. Each job gets hardware isolation, with its own guest kernel, instead of a container.
 
 ```
-GitHub ──long poll──▶ willet ──JIT config──▶ microVM (ghcr.io/actions/actions-runner)
+GitHub ──long poll──▶ willet ──JIT config──▶ microVM (ghcr.io/gerritlansing/willet-runner)
                          │                           └─ run.sh: one job, then exits
                          └─ destroys the VM when the runner exits
 ```
 
 ## Requirements
 
-- Linux with KVM (`/dev/kvm`). macOS on Apple Silicon may work but is untested.
-- Go 1.27.1 or later, with CGO and a C toolchain, to build.
+- Linux on amd64 or arm64 with KVM (`/dev/kvm`) and glibc 2.34 or later (Ubuntu 22.04, Debian 12, RHEL 9 or newer).
+- To build from source instead: Go 1.27.1 or later, with CGO and a C toolchain. macOS on Apple Silicon may work from source but is untested.
 - The microsandbox runtime, which the daemon installs into `~/.microsandbox` on first start. An existing install must match the SDK version in `go.mod` (currently v0.7.3); run `msb self update` to align it.
 - A GitHub App (recommended) or personal access token that can manage self-hosted runners for the target organization, repository or enterprise. See [GitHub's docs](https://docs.github.com/en/actions/tutorials/use-actions-runner-controller/authenticate-to-the-api).
 
 ## Quick start
 
+Download a [release](https://github.com/gerritlansing/willet/releases) and, optionally, check that it was built by this repository's release workflow:
+
 ```sh
-make build
+v=0.1.0 arch=amd64   # or arm64
+curl -LO https://github.com/gerritlansing/willet/releases/download/v$v/willet_${v}_linux_$arch.tar.gz
+gh attestation verify willet_${v}_linux_$arch.tar.gz --repo gerritlansing/willet
+tar -xzf willet_${v}_linux_$arch.tar.gz && cd willet_${v}_linux_$arch
+```
+
+Then configure and start it:
+
+```sh
 cp willet.env.example willet.env   # set URL, NAME and credentials
 chmod 600 willet.env
-./bin/willet --env-file willet.env
+./willet --env-file willet.env
 ```
+
+To build from source, run `make build` instead; the binary is `bin/willet`.
 
 Then target the scale set from a workflow:
 
@@ -50,37 +62,36 @@ Keep the GitHub App private key in its own file (`WILLET_APP_PRIVATE_KEY_FILE`),
 
 ### Runner image and build environment
 
-VMs boot GitHub's runner image, `ghcr.io/actions/actions-runner:latest`, unless you set `WILLET_RUNNER_IMAGE`. That image is deliberately minimal: Ubuntu, the runner, `git`, `curl`, `jq` and a few basics, but no language toolchains or build tools.
+VMs boot the willet runner image, `ghcr.io/gerritlansing/willet-runner:latest`, unless you set `WILLET_RUNNER_IMAGE`. It is GitHub's runner image, [`ghcr.io/actions/actions-runner`](https://github.com/actions/runner/pkgs/container/actions-runner), plus `iptables` for Docker and a few build tools (`build-essential`, `zip`, `xz-utils`); see [`images/runner`](images/runner/Dockerfile). It has no language toolchains.
+
+The image is rebuilt when GitHub releases a new runner version, for amd64 and arm64, and tagged three ways:
+
+- `2.337.0-1`: one build, never changed. The number after the dash counts changes to the image's recipe.
+- `2.337.0`: the newest build of that runner version.
+- `latest`: the newest build.
 
 Jobs can install what they need at run time, with `setup-*` actions or `sudo apt-get install`. But every job starts in a fresh VM, so it downloads and installs those tools again every time. For tools most of your jobs use, it's cheaper to build them into an image once:
 
 ```dockerfile
-FROM ghcr.io/actions/actions-runner:latest
+FROM ghcr.io/gerritlansing/willet-runner:latest
 USER root
 RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential zip \
+ && apt-get install -y --no-install-recommends python3-venv \
  && rm -rf /var/lib/apt/lists/*
 USER runner
 ```
 
 Push it to a registry and point `WILLET_RUNNER_IMAGE` at it. `setup-*` actions still work on top, for example for version matrices.
 
-Any image works if `WILLET_RUNNER_DIR` (default `/home/runner`) contains the runner's `run.sh`, executable by `WILLET_RUNNER_USER` (default `runner`). Building `FROM ghcr.io/actions/actions-runner` keeps that layout. At startup the daemon boots the image and checks this as the configured user, so a broken image fails immediately, not on the first job. The daemon re-pulls your tag daily, but your image only gets a new runner version when you rebuild it. Rebuild at least every few weeks, since GitHub stops sending jobs to runners more than 30 days out of date (see [Keeping the runner up to date](#keeping-the-runner-up-to-date)).
+Any image works if `WILLET_RUNNER_DIR` (default `/home/runner`) contains the runner's `run.sh`, executable by `WILLET_RUNNER_USER` (default `runner`). Building `FROM` the willet or GitHub runner image keeps that layout. At startup the daemon boots the image and checks this as the configured user, so a broken image fails immediately, not on the first job. The daemon re-pulls your tag daily, but your image only gets a new runner version when you rebuild it. Rebuild at least every few weeks, since GitHub stops sending jobs to runners more than 30 days out of date (see [Keeping the runner up to date](#keeping-the-runner-up-to-date)).
 
 For a private registry, set `WILLET_REGISTRY_USERNAME` and `WILLET_REGISTRY_PASSWORD_FILE`; for a private GHCR package, use a token with `read:packages`. The credentials are only used on the host to pull the image. They are never stored in microsandbox's database or passed into VMs. Without them, microsandbox falls back to the service user's OS keyring and Docker credential helpers.
 
 ### Docker in jobs
 
-Set `WILLET_DOCKER=true` to support `container:` jobs, service containers and Docker container actions. Each VM then runs its own Docker daemon, as GitHub-hosted runners do. The daemon starts before the runner, keeps its data on a separate ext4 disk (`WILLET_DOCKER_DISK`, default 20 GiB, sparse), and is removed with the VM.
+`container:` jobs, service containers and Docker container actions work out of the box: each VM runs its own Docker daemon, as GitHub-hosted runners do. The daemon starts before the runner, adding about a second to each VM's start, keeps its data on a separate ext4 disk (`WILLET_DOCKER_DISK`, default 20 GiB, sparse), and is removed with the VM. Set `WILLET_DOCKER=false` to turn it off.
 
-The image must include `dockerd` and `iptables`. GitHub's stock image has `dockerd` but not `iptables`, because it's designed for actions-runner-controller, which runs the daemon in a separate container. Use the project image in [`images/runner`](images/runner/Dockerfile), which adds `iptables` and a few build tools, or add `iptables` to your own. The project image isn't published yet, so for now build and push it yourself:
-
-```sh
-docker build -t registry.example.com/willet-runner images/runner
-docker push registry.example.com/willet-runner
-```
-
-At startup the daemon checks that Docker starts in the image and that the runner user can use it.
+The image must include `dockerd` and `iptables`. The willet image has both. GitHub's stock image has `dockerd` but not `iptables`, because it's designed for actions-runner-controller, which runs the daemon in a separate container; to use it, add `iptables` or turn Docker off. At startup the daemon checks that Docker starts in the image and that the runner user can use it.
 
 Pulls from Docker Hub count against its anonymous rate limit for your host's IP address. For busy hosts, log in within workflows (`docker/login-action`) or use a registry mirror.
 
@@ -120,7 +131,7 @@ Create a service user in the `kvm` group, install the binary and configuration, 
 
 ```sh
 sudo useradd --system --create-home --groups kvm willet
-sudo install -m 755 bin/willet /usr/local/bin/
+sudo install -m 755 willet /usr/local/bin/   # bin/willet if built from source
 sudo install -m 600 willet.env /etc/willet.env
 ```
 

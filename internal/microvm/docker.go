@@ -60,7 +60,7 @@ done`, dockerLog, int(dockerReady.Seconds()))
 	case 0:
 		return nil
 	case 3:
-		return fmt.Errorf("start Docker: the runner image has no dockerd; use an image with Docker installed, such as the willet runner image")
+		return fmt.Errorf("start Docker: the runner image has no dockerd; use an image with Docker installed, such as the willet runner image, or set WILLET_DOCKER=false")
 	}
 	logTail := ""
 	if l, err := sb.Exec(ctx, "tail", []string{"-n", "15", dockerLog}, root...); err == nil {
@@ -68,7 +68,7 @@ done`, dockerLog, int(dockerReady.Seconds()))
 	}
 	hint := ""
 	if strings.Contains(logTail, "iptables not found") {
-		hint = "; the runner image has no iptables, which Docker needs for container networking: use an image that includes it, such as the willet runner image"
+		hint = "; the runner image has no iptables, which Docker needs for container networking: use an image that includes it, such as the willet runner image, or set WILLET_DOCKER=false"
 	}
 	what := "exited"
 	if out.ExitCode() == 5 {
