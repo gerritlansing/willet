@@ -22,7 +22,7 @@ GitHub ──long poll──▶ willet ──JIT config──▶ microVM (ghcr.i
 Download a [release](https://github.com/gerritlansing/willet/releases) and, optionally, check that it was built by this repository's release workflow:
 
 ```sh
-v=0.1.0 arch=amd64   # or arm64
+v=0.1.1 arch=amd64   # or arm64
 curl -LO https://github.com/gerritlansing/willet/releases/download/v$v/willet_${v}_linux_$arch.tar.gz
 gh attestation verify willet_${v}_linux_$arch.tar.gz --repo gerritlansing/willet
 tar -xzf willet_${v}_linux_$arch.tar.gz && cd willet_${v}_linux_$arch
