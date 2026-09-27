@@ -3,6 +3,10 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # A pull request that changes this workflow runs it as a dry run: everything
+  # up to the attestations, with a placeholder version, and nothing published.
+  pull_request:
+    paths: [.github/workflows/release.yml]
 
 permissions:
   contents: read
@@ -33,9 +37,10 @@ jobs:
       - name: Build and package
         env:
           ARCH: ${{ matrix.arch }}
+          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.0.0-dryrun' }}
         run: |
-          make build VERSION="$GITHUB_REF_NAME" COMMIT="${GITHUB_SHA::7}"
-          name="willet_${GITHUB_REF_NAME#v}_linux_${ARCH}"
+          make build VERSION="$VERSION" COMMIT="${GITHUB_SHA::7}"
+          name="willet_${VERSION#v}_linux_${ARCH}"
           mkdir -p "dist/$name"
           cp bin/willet LICENSE README.md willet.env.example "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
@@ -49,6 +54,8 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.0.0-dryrun' }}
     permissions:
       contents: write
       id-token: write
@@ -64,30 +71,38 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Name the SBOM
+        run: echo "SBOM=dist/willet_${VERSION#v}.spdx.json" >> "$GITHUB_ENV"
+
       - uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           path: .
           format: spdx-json
-          output-file: dist/willet_${{ github.ref_name }}.spdx.json
+          output-file: ${{ env.SBOM }}
           upload-artifact: false
           upload-release-assets: false
 
       - name: Checksums
         working-directory: dist
-        run: sha256sum ./*.tar.gz ./*.spdx.json | sed 's# \./# #' > SHA256SUMS
+        run: |
+          sha256sum *.tar.gz *.spdx.json > SHA256SUMS
+          cat SHA256SUMS
 
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        if: github.ref_type == 'tag'
         with:
           subject-path: dist/*.tar.gz
 
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        if: github.ref_type == 'tag'
         with:
           subject-path: dist/*.tar.gz
-          sbom-path: dist/willet_${{ github.ref_name }}.spdx.json
+          sbom-path: ${{ env.SBOM }}
 
       # Assets are uploaded to a draft first: with immutable releases, a
       # published release can't gain or change assets.
       - name: Publish release
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
