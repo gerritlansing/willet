@@ -63,7 +63,7 @@ jobs:
 
 ### Runner image and build environment
 
-VMs boot the willet runner image, `ghcr.io/gerritlansing/willet-runner:latest`, unless you set `WILLET_RUNNER_IMAGE`. It is GitHub's runner image, [`ghcr.io/actions/actions-runner`](https://github.com/actions/runner/pkgs/container/actions-runner), plus `iptables` for Docker and a few build tools (`build-essential`, `zip`, `xz-utils`, `zstd`); see [`images/runner`](images/runner/Dockerfile). Other language toolchains aren't included.
+VMs boot the willet runner image, `ghcr.io/gerritlansing/willet-runner:latest`, unless you set `WILLET_RUNNER_IMAGE`. It is GitHub's runner image, [`ghcr.io/actions/actions-runner`](https://github.com/actions/runner/pkgs/container/actions-runner), plus `iptables` for Docker and the tools actions and scripts commonly expect: Docker Compose, `gh`, `git-lfs`, `build-essential`, Python's `pip`, `venv` and `pipx`, `zstd` and everyday utilities; see [`images/runner`](images/runner/Dockerfile). Language toolchains are left to `setup-*` actions.
 
 The image is rebuilt when GitHub releases a new runner version, for amd64 and arm64, and tagged three ways:
 
