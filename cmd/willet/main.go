@@ -103,7 +103,7 @@ the environment, which wins over the env file.`,
 	f.StringVar(&privateKeyFile, "app-private-key-file", "", "path to the GitHub App private key (PEM)")
 	f.StringVar(&cfg.Token, "token", "", "personal access token (alternative to a GitHub App)")
 
-	f.StringVar(&cfg.RunnerImage, "runner-image", "ghcr.io/actions/actions-runner:latest", "OCI image containing the actions runner; a custom image needs run.sh in --runner-dir, executable by --runner-user")
+	f.StringVar(&cfg.RunnerImage, "runner-image", "ghcr.io/gerritlansing/willet-runner:latest", "OCI image containing the actions runner; a custom image needs run.sh in --runner-dir, executable by --runner-user")
 	f.StringVar(&cfg.RegistryUsername, "registry-username", "", "username for pulling --runner-image from a private registry")
 	f.StringVar(&registryPasswordFile, "registry-password-file", "", "path to the password or token for --registry-username")
 	f.Uint8Var(&cfg.CPUs, "cpus", 2, "vCPUs per runner VM")
@@ -115,7 +115,7 @@ the environment, which wins over the env file.`,
 	f.StringVar(&cfg.RunnerDir, "runner-dir", "/home/runner", "guest directory containing run.sh")
 	f.StringSliceVar(&cfg.NetworkAllow, "network-allow", nil, "private IPs or CIDRs runner VMs may reach, each optionally with :port or :port-range, e.g. 10.0.5.10,10.1.0.0/16:443 (VMs reach only the public internet by default)")
 	f.BoolVar(&cfg.DNSRebindProtection, "dns-rebind-protection", true, "drop private DNS answers unless --network-allow covers the address without a port; false lets port-restricted entries work by name (see README)")
-	f.BoolVar(&cfg.Docker, "docker", false, "run a Docker daemon in each VM for container jobs, service containers and Docker actions; the image needs dockerd and iptables")
+	f.BoolVar(&cfg.Docker, "docker", true, "run a Docker daemon in each VM for container jobs, service containers and Docker actions; the image needs dockerd and iptables")
 	f.Uint32Var(&cfg.DockerDiskMiB, "docker-disk", 20480, "Docker data disk per VM in MiB (sparse; only space actually used is allocated)")
 	f.BoolVar(&cfg.SkipWarmup, "skip-warmup", false, "skip pulling the image and booting a test VM at startup; the cached image is used until the first scheduled refresh")
 	f.DurationVar(&cfg.ImageRefreshInterval, "image-refresh-interval", 24*time.Hour, "how often to re-pull a tagged image such as :latest and move new runners to it (0 = never; ignored for digest-pinned images)")
