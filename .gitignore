@@ -1,0 +1,52 @@
+# --- Secrets -------------------------------------------------------------------
+# Environment files in every common naming style: .env, .env.local,
+# .env.production, willet.env, prod.env.local, ...
+.env
+.env.*
+*.env
+*.env.*
+.envrc
+# ...except committed templates, which must never hold real values.
+!.env.example
+!*.env.example
+!.env.sample
+!*.env.sample
+!.env.template
+!*.env.template
+
+# Private keys and certificates (e.g. the GitHub App key).
+*.pem
+*.key
+*.p12
+*.pfx
+
+# --- Go ------------------------------------------------------------------------
+# Build output.
+/bin/
+/dist/
+/willet
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binaries and coverage profiles.
+*.test
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+
+# Local workspace files; they point at paths on one machine.
+go.work
+go.work.sum
+
+# --- Editors and OS ------------------------------------------------------------
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
