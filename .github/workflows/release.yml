@@ -71,11 +71,14 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Name the SBOM
+        run: echo "SBOM=dist/willet_${VERSION#v}.spdx.json" >> "$GITHUB_ENV"
+
       - uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
         with:
           path: .
           format: spdx-json
-          output-file: dist/willet_${{ env.VERSION }}.spdx.json
+          output-file: ${{ env.SBOM }}
           upload-artifact: false
           upload-release-assets: false
 
@@ -94,7 +97,7 @@ jobs:
         if: github.ref_type == 'tag'
         with:
           subject-path: dist/*.tar.gz
-          sbom-path: dist/willet_${{ env.VERSION }}.spdx.json
+          sbom-path: ${{ env.SBOM }}
 
       # Assets are uploaded to a draft first: with immutable releases, a
       # published release can't gain or change assets.
