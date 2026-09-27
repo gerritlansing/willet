@@ -11,5 +11,6 @@ RUN apt-get update \
       build-essential \
       zip \
       xz-utils \
+      zstd \
  && rm -rf /var/lib/apt/lists/*
 USER runner
