@@ -44,3 +44,58 @@ func TestDockerConfigValidate(t *testing.T) {
 		t.Fatalf("disk size must not matter with Docker off: %v", err)
 	}
 }
+
+func TestParseRegistryMirror(t *testing.T) {
+	for in, want := range map[string]string{
+		"http://host.microsandbox.internal:5000":    "http://host.microsandbox.internal:5000",
+		" http://host.microsandbox.internal:5000/ ": "http://host.microsandbox.internal:5000",
+		"https://mirror.example.com":                "https://mirror.example.com",
+		"http://10.0.5.10:5000":                     "http://10.0.5.10:5000",
+	} {
+		got, err := ParseRegistryMirror(in)
+		if err != nil || got != want {
+			t.Errorf("%q: got %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, in := range []string{
+		"host.microsandbox.internal:5000",   // no scheme
+		"ftp://mirror.example.com",          // wrong scheme
+		"http://",                           // no host
+		"http://mirror.example.com/v2",      // path
+		"http://user:pw@mirror.example.com", // credentials
+		"http://mirror.example.com?x=1",     // query
+		"http://mirror.example.com:0",       // bad port
+		"http://mirror.example.com:99999",   // bad port
+	} {
+		if got, err := ParseRegistryMirror(in); err == nil {
+			t.Errorf("%q: accepted as %q", in, got)
+		}
+	}
+}
+
+func TestMirrorHostPort(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                                       "",
+		"http://host.microsandbox.internal:5000": "5000",
+		"http://host.microsandbox.internal":      "80",
+		"https://HOST.microsandbox.internal":     "443",
+		"http://mirror.example.com:5000":         "",
+		"http://10.0.5.10:5000":                  "",
+	} {
+		if got := mirrorHostPort(in); got != want {
+			t.Errorf("%q: got %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRegistryMirrorNeedsDocker(t *testing.T) {
+	c := validConfig()
+	c.DockerRegistryMirror = "http://host.microsandbox.internal:5000"
+	if err := c.Validate(); err == nil {
+		t.Fatal("accepted a registry mirror with Docker off")
+	}
+	c.Docker, c.DockerDiskMiB = true, 20480
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}

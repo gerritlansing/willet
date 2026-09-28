@@ -3,6 +3,7 @@ package microvm
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"slices"
 	"strings"
@@ -187,6 +188,9 @@ func (r sandboxRuntime) probe(ctx context.Context, name, ref string) (string, er
 			}
 			if err := p.checkDockerAccess(ctx, sb); err != nil {
 				return fmt.Errorf("image %s: %w", ref, err)
+			}
+			if err := p.checkRegistryMirror(ctx, sb); err != nil {
+				p.logger.Warn("Registry mirror unreachable", slog.String("error", err.Error()))
 			}
 		}
 		// Best effort: custom images may not ship the standard runner layout.

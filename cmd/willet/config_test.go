@@ -68,6 +68,8 @@ func TestInvalidConfigFailsBeforeRun(t *testing.T) {
 		{name: "empty registry password file", args: []string{"--url", "https://github.com/org", "--registry-username", "bot"}, env: map[string]string{"WILLET_REGISTRY_PASSWORD_FILE": "EMPTY_FILE"}, wantErr: "must be set together"},
 		{name: "missing registry password file", args: []string{"--url", "https://github.com/org", "--registry-username", "bot", "--registry-password-file", "/nonexistent/pw"}, wantErr: "read --registry-password-file"},
 		{name: "hostname in network allow", args: []string{"--url", "https://github.com/org", "--network-allow", "10.0.0.1,ghes.corp"}, wantErr: "--network-allow"},
+		{name: "registry mirror without docker", args: []string{"--url", "https://github.com/org", "--docker=false", "--docker-registry-mirror", "http://host.microsandbox.internal:5000"}, wantErr: "needs --docker"},
+		{name: "registry mirror with a path", args: []string{"--url", "https://github.com/org", "--docker-registry-mirror", "http://host.microsandbox.internal:5000/v2"}, wantErr: "--docker-registry-mirror"},
 		{name: "network allow empty port", args: []string{"--url", "https://github.com/org"}, envFile: "WILLET_NETWORK_ALLOW=10.0.5.10:${UNSET_PORT}\n", wantErr: "invalid port"},
 		{name: "network allow everything", args: []string{"--url", "https://github.com/org"}, env: map[string]string{"WILLET_NETWORK_ALLOW": "0.0.0.0/0"}, wantErr: "every address"},
 		{name: "unknown log level", args: []string{"--url", "https://github.com/org", "--log-level", "verbose"}, wantErr: "--log-level"},

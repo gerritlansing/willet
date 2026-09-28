@@ -54,7 +54,10 @@ type Config struct {
 	// Docker runs a Docker daemon in each VM on a DockerDiskMiB data disk.
 	Docker        bool
 	DockerDiskMiB uint32
-	networkAllow  []microvm.AllowRule
+	// DockerRegistryMirror is a Docker Hub pull-through cache URL for the
+	// VMs' Docker daemons; normalized by Validate.
+	DockerRegistryMirror string
+	networkAllow         []microvm.AllowRule
 
 	DeleteOnExit bool
 	LogLevel     string
@@ -106,6 +109,16 @@ func (c *Config) Validate() error {
 	c.networkAllow = rules
 	if c.Docker && c.DockerDiskMiB < 1024 {
 		return fmt.Errorf("--docker-disk must be at least 1024 MiB (got %d)", c.DockerDiskMiB)
+	}
+	if c.DockerRegistryMirror != "" {
+		if !c.Docker {
+			return errors.New("--docker-registry-mirror needs --docker")
+		}
+		mirror, err := microvm.ParseRegistryMirror(c.DockerRegistryMirror)
+		if err != nil {
+			return fmt.Errorf("--docker-registry-mirror: %w", err)
+		}
+		c.DockerRegistryMirror = mirror
 	}
 	if c.StartTimeout <= 0 {
 		return fmt.Errorf("--start-timeout must be positive (got %s)", c.StartTimeout)

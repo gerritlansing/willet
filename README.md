@@ -94,7 +94,15 @@ For a private registry, set `WILLET_REGISTRY_USERNAME` and `WILLET_REGISTRY_PASS
 
 The image must include `dockerd` and `iptables`. The willet image has both; GitHub's stock image lacks `iptables`, so add it or turn Docker off.
 
-Pulls from Docker Hub count against its anonymous rate limit for your host's IP address. For busy hosts, log in within workflows (`docker/login-action`) or use a registry mirror.
+Every VM starts with an empty Docker cache, so each job downloads its images again, and pulls from Docker Hub count against its anonymous rate limit for your host's IP address. A pull-through cache on the host fixes both. Run one bound to loopback:
+
+```sh
+docker run -d --name docker-hub-mirror --restart always -p 127.0.0.1:5000:5000 \
+  -v docker-hub-mirror:/var/lib/registry \
+  -e REGISTRY_PROXY_REMOTEURL=https://registry-1.docker.io registry:3
+```
+
+and point willet at it with `WILLET_DOCKER_REGISTRY_MIRROR=http://host.microsandbox.internal:5000`. VMs reach the host by that name, and willet allows only that port. Docker mirrors cover Docker Hub images only. If the cache is down, Docker falls back to Docker Hub, and the daemon warns at startup.
 
 ### Keeping the runner up to date
 
