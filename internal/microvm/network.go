@@ -134,15 +134,17 @@ func validatePort(p string) error {
 }
 
 // networkPolicy returns microsandbox's default policy (public internet and
-// gateway DNS only) with the allow rules inserted, or nil to leave the
-// runtime default untouched when nothing differs from it.
+// gateway DNS only) with the allow rules and host ports inserted, or nil to
+// leave the runtime default untouched when nothing differs from it.
+// hostPorts are ports on the host itself (host.microsandbox.internal), which
+// the default policy denies.
 //
 // disableRebind turns off DNS rebinding protection so private DNS answers
 // reach the guest. Connections are still limited to the allowed destinations;
 // what changes is that port-restricted entries then also work by name. That
 // is an operator decision, off by default.
-func networkPolicy(allow []AllowRule, disableRebind bool, nameservers []string) *msb.NetworkConfig {
-	if len(allow) == 0 && !disableRebind && len(nameservers) == 0 {
+func networkPolicy(allow []AllowRule, hostPorts []string, disableRebind bool, nameservers []string) *msb.NetworkConfig {
+	if len(allow) == 0 && len(hostPorts) == 0 && !disableRebind && len(nameservers) == 0 {
 		return nil
 	}
 	// The Public profile is default-deny with only allow rules (gateway DNS
@@ -155,6 +157,15 @@ func networkPolicy(allow []AllowRule, disableRebind bool, nameservers []string) 
 			Direction:   msb.PolicyDirectionEgress,
 			Destination: a.dest(),
 			Port:        a.Port,
+		})
+	}
+	for _, port := range hostPorts {
+		cfg.Rules = append(cfg.Rules, msb.PolicyRule{
+			Action:      msb.PolicyActionAllow,
+			Direction:   msb.PolicyDirectionEgress,
+			Destination: "host",
+			Protocol:    msb.PolicyProtocolTCP,
+			Port:        port,
 		})
 	}
 	if disableRebind || len(nameservers) > 0 {

@@ -37,6 +37,11 @@ type Config struct {
 	// for container jobs, service containers and Docker actions.
 	Docker        bool
 	DockerDiskMiB uint32
+	// DockerRegistryMirror is a Docker Hub pull-through cache for the VMs'
+	// Docker daemons, as returned by ParseRegistryMirror. A mirror on
+	// host.microsandbox.internal gets its port on the host allowed. Empty
+	// means none.
+	DockerRegistryMirror string
 	// NetworkAllow adds egress exceptions to microsandbox's default policy,
 	// which allows only the public internet and DNS.
 	NetworkAllow []AllowRule
@@ -79,6 +84,8 @@ func (c Config) Validate() error {
 		return errors.New("image is required")
 	case c.CPUs == 0 || c.MemoryMiB == 0:
 		return errors.New("CPUs and memory must be positive")
+	case c.DockerRegistryMirror != "" && !c.Docker:
+		return errors.New("a Docker registry mirror needs Docker enabled")
 	case c.Docker && c.DockerDiskMiB < 1024:
 		return fmt.Errorf("Docker disk must be at least 1024 MiB (got %d)", c.DockerDiskMiB)
 	case c.CreateTimeout < 0:
@@ -185,7 +192,11 @@ func (p *Provisioner) sandboxOptions(name, image string) []msb.SandboxOption {
 	if p.cfg.MaxDuration > 0 {
 		opts = append(opts, msb.WithMaxDuration(p.cfg.MaxDuration))
 	}
-	if policy := networkPolicy(p.cfg.NetworkAllow, p.cfg.DisableDNSRebindProtection, p.nameservers); policy != nil {
+	var hostPorts []string
+	if port := mirrorHostPort(p.cfg.DockerRegistryMirror); port != "" {
+		hostPorts = append(hostPorts, port)
+	}
+	if policy := networkPolicy(p.cfg.NetworkAllow, hostPorts, p.cfg.DisableDNSRebindProtection, p.nameservers); policy != nil {
 		opts = append(opts, msb.WithNetwork(policy))
 	}
 	if p.cfg.RegistryUsername != "" {

@@ -67,7 +67,7 @@ func TestParseAllowRule(t *testing.T) {
 }
 
 func TestNetworkPolicy(t *testing.T) {
-	if networkPolicy(nil, false, nil) != nil {
+	if networkPolicy(nil, nil, false, nil) != nil {
 		t.Fatal("no allow rules must leave the runtime default untouched")
 	}
 
@@ -75,7 +75,7 @@ func TestNetworkPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := networkPolicy(rules, false, nil)
+	got := networkPolicy(rules, nil, false, nil)
 	base := msb.NetworkPolicy.FromProfiles(msb.NetworkProfilePublic)
 
 	// The base policy is kept intact: same defaults, all of its rules.
@@ -148,7 +148,7 @@ func TestIsPublic(t *testing.T) {
 }
 
 func TestNetworkPolicyRebindSetting(t *testing.T) {
-	got := networkPolicy(nil, true, nil)
+	got := networkPolicy(nil, nil, true, nil)
 	if got == nil || got.DNS == nil || got.DNS.RebindProtection == nil || *got.DNS.RebindProtection {
 		t.Fatalf("disabling rebind protection not applied: %+v", got)
 	}
@@ -170,5 +170,24 @@ func TestHintOffersBothOptions(t *testing.T) {
 	p.cfg.DisableDNSRebindProtection = true
 	if h := p.hint("10.0.5.10", "443", true); strings.Contains(h, "REBIND") {
 		t.Errorf("rebind protection is already off; hint shouldn't suggest it: %s", h)
+	}
+}
+
+// A mirror on the host opens exactly its port on the host, over TCP, and
+// nothing else in the host group.
+func TestNetworkPolicyHostPorts(t *testing.T) {
+	got := networkPolicy(nil, []string{"5000"}, false, nil)
+	if got == nil {
+		t.Fatal("a host port must produce a policy")
+	}
+	base := msb.NetworkPolicy.FromProfiles(msb.NetworkProfilePublic)
+	want := msb.PolicyRule{Action: msb.PolicyActionAllow, Direction: msb.PolicyDirectionEgress, Destination: "host", Protocol: msb.PolicyProtocolTCP, Port: "5000"}
+	if len(got.Rules) != len(base.Rules)+1 || !slices.ContainsFunc(got.Rules, func(r msb.PolicyRule) bool { return sameRule(r, want) }) {
+		t.Fatalf("want the base rules plus %+v, got %+v", want, got.Rules)
+	}
+	for _, r := range got.Rules {
+		if r.Destination == "host" && r.Port != "53" && r.Port != "5000" {
+			t.Fatalf("policy opens more of the host: %+v", r)
+		}
 	}
 }

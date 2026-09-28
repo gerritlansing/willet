@@ -117,6 +117,7 @@ the environment, which wins over the env file.`,
 	f.BoolVar(&cfg.DNSRebindProtection, "dns-rebind-protection", true, "drop private DNS answers unless --network-allow covers the address without a port; false lets port-restricted entries work by name (see README)")
 	f.BoolVar(&cfg.Docker, "docker", true, "run a Docker daemon in each VM for container jobs, service containers and Docker actions; the image needs dockerd and iptables")
 	f.Uint32Var(&cfg.DockerDiskMiB, "docker-disk", 20480, "Docker data disk per VM in MiB (sparse; only space actually used is allocated)")
+	f.StringVar(&cfg.DockerRegistryMirror, "docker-registry-mirror", "", "Docker Hub pull-through cache for the VMs' Docker daemons, e.g. http://host.microsandbox.internal:5000 for one on this host")
 	f.BoolVar(&cfg.SkipWarmup, "skip-warmup", false, "skip pulling the image and booting a test VM at startup; the cached image is used until the first scheduled refresh")
 	f.DurationVar(&cfg.ImageRefreshInterval, "image-refresh-interval", 24*time.Hour, "how often to re-pull a tagged image such as :latest and move new runners to it (0 = never; ignored for digest-pinned images)")
 
@@ -170,6 +171,7 @@ func run(ctx context.Context, cfg Config) error {
 		DisableDNSRebindProtection: !cfg.DNSRebindProtection,
 		Docker:                     cfg.Docker,
 		DockerDiskMiB:              cfg.DockerDiskMiB,
+		DockerRegistryMirror:       cfg.DockerRegistryMirror,
 		CPUs:                       cfg.CPUs,
 		MemoryMiB:                  cfg.MemoryMiB,
 		DiskMiB:                    cfg.DiskMiB,
