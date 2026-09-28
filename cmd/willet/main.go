@@ -131,6 +131,7 @@ the environment, which wins over the env file.`,
 
 func run(ctx context.Context, cfg Config) error {
 	logger := cfg.Logger()
+	logger.Info("Starting willet", slog.String("version", version), slog.String("commit", commit))
 
 	// Take the single-instance lock before anything that can destroy VMs, so
 	// a second daemon for the same scale set exits without side effects.
@@ -270,6 +271,7 @@ func run(ctx context.Context, cfg Config) error {
 	}
 
 	logger.Info("Listening for jobs",
+		slog.String("version", version),
 		slog.String("scaleSet", scaleSet.Name),
 		slog.Int("scaleSetID", scaleSet.ID),
 		slog.Any("labels", labelNames(scaleSet.Labels)),
