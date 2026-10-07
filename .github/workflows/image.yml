@@ -1,9 +1,9 @@
 name: Runner image
 
 # Publishes ghcr.io/<owner>/willet-runner. Each build gets an immutable tag
-# <runner version>-<revision>, e.g. 2.337.0-1, where the revision counts the
-# commits that changed images/runner. The moving tags <runner version> and
-# latest point to the newest build.
+# <runner version>-<revision>, e.g. 2.337.0-1, where the revision starts at 1
+# for each runner version and goes up each time images/runner changes. The
+# moving tags <runner version> and latest point to the newest build.
 #
 # GitHub requires self-hosted runners with automatic updates off to move to a
 # new runner release within 30 days, so a daily check builds the image when
@@ -47,22 +47,31 @@ jobs:
         run: |
           version=$(gh api repos/actions/runner/releases/latest --jq .tag_name)
           version=${version#v}
-          revision=$(git rev-list --count HEAD -- images/runner)
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/willet-runner"
+          revision=0
+          built=
+          if latest=$(docker buildx imagetools inspect "$image:$version" \
+            --format '{{ with (index .Image "linux/amd64").Config.Labels }}{{ index . "org.opencontainers.image.version" }} {{ index . "org.opencontainers.image.revision" }}{{ end }}' 2>/dev/null); then
+            read -r full built <<< "$latest"
+            revision=${full##*-}
+          fi
+          build=true
+          if ! docker buildx imagetools inspect "ghcr.io/actions/actions-runner:$version" >/dev/null 2>&1; then
+            echo "::notice::ghcr.io/actions/actions-runner:$version is not published yet"
+            build=false
+          elif [[ -n $built && $(git rev-parse --verify --quiet "$built:images/runner") == "$(git rev-parse HEAD:images/runner)" ]]; then
+            echo "::notice::$image:$full is up to date"
+            build=false
+          fi
+          if [[ $build == true ]]; then
+            revision=$((revision + 1))
+          fi
           {
             echo "version=$version"
             echo "full=$version-$revision"
             echo "image=$image"
+            echo "build=$build"
           } >> "$GITHUB_OUTPUT"
-          if ! docker buildx imagetools inspect "ghcr.io/actions/actions-runner:$version" >/dev/null 2>&1; then
-            echo "::notice::ghcr.io/actions/actions-runner:$version is not published yet"
-            echo "build=false" >> "$GITHUB_OUTPUT"
-          elif docker buildx imagetools inspect "$image:$version-$revision" >/dev/null 2>&1; then
-            echo "::notice::$image:$version-$revision already exists"
-            echo "build=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          fi
 
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         if: steps.runner.outputs.build == 'true'
