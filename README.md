@@ -14,7 +14,7 @@ GitHub ──long poll──▶ willet ──runner config──▶ microVM (ghc
 
 - Linux on amd64 or arm64 with KVM (`/dev/kvm`) and glibc 2.34 or later (Ubuntu 22.04, Debian 12, RHEL 9 or newer).
 - To build from source instead: Go 1.27.1 or later, with CGO and a C toolchain.
-- The microsandbox runtime, which the daemon installs into `~/.microsandbox` on first start, next to its image cache. An existing install must match the SDK version in `go.mod`; run `msb self update` to align it.
+- The microsandbox runtime, which the daemon installs into `~/.microsandbox` on first start, next to its image cache. On every start it updates an older runtime there to the version it was built for. It never downgrades a newer one, and it leaves alone a runtime selected with `MSB_PATH`.
 - A GitHub App (recommended) or classic personal access token that can manage self-hosted runners for the target repository or organization. Enterprise-level runners need a classic token, because GitHub Apps can't register them. See [GitHub's docs](https://docs.github.com/en/actions/how-tos/manage-runners/use-actions-runner-controller/authenticate-to-the-api) for the permissions.
 
 ## Quick start
@@ -172,6 +172,7 @@ sudo journalctl -u willet -f   # wait for "Listening for jobs"
 
 - `EnvironmentFile` is read by systemd as root, so `/etc/willet.env` can stay root-owned with mode 600. The daemon itself reads the GitHub App private key file and any registry password file, so the service user must be able to read those.
 - `StateDirectory=` creates `/var/lib/willet` for the single-instance lock.
+- The service user's `~/.microsandbox` holds willet's runtime, images and VMs. When willet updates the runtime, anything else running as that user gets the new version too. To give willet its own runtime under a shared user, set `MSB_HOME` to a directory of its own in `/etc/willet.env`.
 
 ## How it works
 
