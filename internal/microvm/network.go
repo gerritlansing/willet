@@ -20,7 +20,7 @@ import (
 // Names resolve through microsandbox's DNS proxy, whose rebinding protection
 // drops private answers unless an address rule *without a port restriction*
 // covers them. A port-restricted rule therefore only helps clients that
-// connect by IP. Verified against microsandbox v0.7.3.
+// connect by IP. Verified against microsandbox v0.7.7.
 
 // AllowRule permits egress to an address or network, optionally on specific
 // ports.

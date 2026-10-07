@@ -13,13 +13,14 @@ import (
 // pull, when Config.CreateTimeout is unset.
 const defaultCreateTimeout = 10 * time.Minute
 
-// When CreateSandbox is canceled part-way, microsandbox v0.7.3 rolls the
-// sandbox back to stopped rather than removing it, even if ephemeral, and it
-// may stay until an unrelated sandbox start sweeps it up
-// (superradcompany/microsandbox#1687). So creation is never canceled: it runs
-// in the background, bounded only by its own timeout. The caller waits only as
-// long as its context allows; if it stops waiting, or creation fails, it gets
-// a pendingSandbox, an obligation to destroy whatever the creation leaves.
+// When CreateSandbox is canceled part-way, microsandbox rolls the sandbox
+// back to stopped rather than removing it, even if ephemeral, and it may stay
+// until an unrelated sandbox start sweeps it up
+// (superradcompany/microsandbox#1687, open as of v0.7.7). So creation is never
+// canceled: it runs in the background, bounded only by its own timeout. The
+// caller waits only as long as its context allows; if it stops waiting, or
+// creation fails, it gets a pendingSandbox, an obligation to destroy whatever
+// the creation leaves.
 
 // creation is one sandbox creation running in the background.
 type creation struct {
