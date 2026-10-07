@@ -24,7 +24,7 @@ import (
 // Hub images from a pull-through cache instead of downloading them again. A
 // VM reaches the host as hostAlias; connections to it arrive on the host's
 // loopback, so a cache bound to 127.0.0.1 is enough. Plain http works for a
-// mirror without --insecure-registry. Verified against microsandbox v0.7.3
+// mirror without --insecure-registry. Verified against microsandbox v0.7.7
 // and Docker 29.
 
 const (
