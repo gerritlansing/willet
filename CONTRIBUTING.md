@@ -12,7 +12,7 @@ You need:
 
 - Linux with KVM (`/dev/kvm`) to run the integration tests. Unit tests run anywhere Go runs.
 - Go 1.27.1 or later, with CGO and a C toolchain. With the default `GOTOOLCHAIN=auto`, an older `go` downloads the required version.
-- The microsandbox runtime in `~/.microsandbox`, at the same version as the Go SDK in `go.mod`. The daemon installs it on first start; `msb self update` realigns an existing install.
+- The microsandbox runtime in `~/.microsandbox`, at the same version as the Go SDK in `go.mod`. The daemon and the integration tests install it, or update an older one, on start.
 
 ```sh
 make build        # bin/willet
@@ -34,7 +34,7 @@ The Docker integration tests build the project runner image inside a microVM (no
 ## Dependencies
 
 - **Vulnerabilities:** run `make vuln` after bumping Go or a dependency. Dependabot covers the modules in `go.mod`, but not the Go standard library or toolchain. `govulncheck` is pinned in `go.mod` as a tool, so it is always built with the current toolchain; a separately installed copy fails when its Go version doesn't match.
-- **microsandbox:** the Go SDK and the `msb` runtime must be the same version. Bump both together.
+- **microsandbox:** bump the Go SDK in `go.mod`. The daemon updates each host's runtime to match on start. Run `make integration` on the new runtime, and re-check the notes in `internal/microvm` that say which version they were verified against.
 - **scaleset:** pinned to v0.4.0, its latest release. Its `main` branch replaces the `listener.Scaler` interface with a single `Scale(ctx, msg)` method, so the next release needs a small adapter in `internal/scaler`.
 
 ## Layout
