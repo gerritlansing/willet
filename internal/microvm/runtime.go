@@ -33,18 +33,14 @@ type runtimeSetup struct {
 	version func(ctx context.Context, msbPath string) (string, error)
 }
 
-// sdkRuntime is the runtimeSetup for the runtime config resolves to; the zero
-// config is the default runtime home.
-func sdkRuntime(config msb.RuntimeConfig) runtimeSetup {
-	return runtimeSetup{
-		ensure: func(ctx context.Context) (msb.ResolvedRuntime, error) {
-			return msb.EnsureRuntime(ctx, config, msb.InstallOptions{})
-		},
-		install: func(ctx context.Context) (msb.ResolvedRuntime, error) {
-			return msb.InstallRuntime(ctx, config, msb.InstallOptions{Force: true})
-		},
-		version: msbVersion,
-	}
+var sdkRuntimeSetup = runtimeSetup{
+	ensure: func(ctx context.Context) (msb.ResolvedRuntime, error) {
+		return msb.EnsureRuntime(ctx, msb.RuntimeConfig{}, msb.InstallOptions{})
+	},
+	install: func(ctx context.Context) (msb.ResolvedRuntime, error) {
+		return msb.InstallRuntime(ctx, msb.RuntimeConfig{}, msb.InstallOptions{Force: true})
+	},
+	version: msbVersion,
 }
 
 // alignRuntime returns an installed runtime at version want, installing or

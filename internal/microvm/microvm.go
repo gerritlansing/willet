@@ -136,7 +136,7 @@ func New(ctx context.Context, cfg Config, logger *slog.Logger) (*Provisioner, er
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid VM config: %w", err)
 	}
-	rt, err := alignRuntime(ctx, logger, msb.SDKVersion(), sdkRuntime(msb.RuntimeConfig{}))
+	rt, err := alignRuntime(ctx, logger, msb.SDKVersion(), sdkRuntimeSetup)
 	if err != nil {
 		return nil, fmt.Errorf("ensure microsandbox runtime: %w", err)
 	}
