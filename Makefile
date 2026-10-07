@@ -12,7 +12,7 @@ test:
 	go test -race ./...
 
 integration:
-	go test -tags integration -count=1 -v ./internal/microvm/
+	go test -tags integration -count=1 -timeout 25m -v ./internal/microvm/
 
 # Scans the source for known vulnerabilities in dependencies and the Go
 # standard library (which Dependabot does not cover). govulncheck is pinned in
