@@ -13,7 +13,7 @@ GitHub ──long poll──▶ willet ──runner config──▶ microVM (ghc
 ## Requirements
 
 - Linux on amd64 or arm64 with KVM (`/dev/kvm`) and glibc 2.34 or later (Ubuntu 22.04, Debian 12, RHEL 9 or newer).
-- To build from source instead: Go 1.27.1 or later, with CGO and a C toolchain.
+- To build from source instead: Go 1.27.2 or later, with CGO and a C toolchain.
 - The microsandbox runtime, which the daemon installs into `~/.microsandbox` on first start, next to its image cache. On every start it updates an older runtime there to the version it was built for. It never downgrades a newer one, and it leaves alone a runtime selected with `MSB_PATH`.
 - A GitHub App (recommended) or classic personal access token that can manage self-hosted runners for the target repository or organization. Enterprise-level runners need a classic token, because GitHub Apps can't register them. See [GitHub's docs](https://docs.github.com/en/actions/how-tos/manage-runners/use-actions-runner-controller/authenticate-to-the-api) for the permissions.
 
