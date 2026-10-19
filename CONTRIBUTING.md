@@ -11,7 +11,7 @@ Thanks for your interest in willet. Bug reports, fixes and improvements are welc
 You need:
 
 - Linux with KVM (`/dev/kvm`) to run the integration tests. Unit tests run anywhere Go runs.
-- Go 1.27.1 or later, with CGO and a C toolchain. With the default `GOTOOLCHAIN=auto`, an older `go` downloads the required version.
+- Go 1.27.2 or later, with CGO and a C toolchain. With the default `GOTOOLCHAIN=auto`, an older `go` downloads the required version.
 - The microsandbox runtime in `~/.microsandbox`, at the same version as the Go SDK in `go.mod`. The daemon and the integration tests install it, or update an older one, on start.
 
 ```sh
