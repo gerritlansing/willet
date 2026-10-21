@@ -1,8 +1,12 @@
 name: Vulnerability scan
 
-# Dependabot does not track the Go version in go.mod, and the PR scan only warns
-# on standard-library advisories. A daily scan of main surfaces them as a failed
-# run.
+# Dependabot and the PR dependency review do not cover the Go standard library,
+# and a new advisory for a module already in go.mod doesn't fail a PR. A daily
+# scan of main surfaces both as a failed run.
+#
+# Like the PR check, it fails on modules only for high or critical advisories,
+# rated by GitHub's advisory database. Standard-library advisories have no
+# rating there, so they always fail.
 
 on:
   schedule:
@@ -25,4 +29,40 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - run: make vuln
+      - name: Scan with govulncheck
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          go tool govulncheck -format json ./... > "$RUNNER_TEMP/vuln.json"
+          # Symbol-level findings are the ones in code willet calls, which make vuln fails on.
+          # Each row: Go advisory, module, fixed version, GitHub advisories.
+          jq -rs '
+            (map(select(.osv) | .osv | {key: .id, value: [.aliases[]? | select(startswith("GHSA-"))]}) | from_entries) as $ghsa
+            | map(select(.finding.trace[0].function) | .finding
+                | [.osv, .trace[0].module, .fixed_version // "no release", ($ghsa[.osv] // [] | join(","))])
+            | unique[] | @tsv' "$RUNNER_TEMP/vuln.json" > "$RUNNER_TEMP/findings.tsv"
+          failed=0
+          while IFS=$'\t' read -r osv module fixed ghsas; do
+            if [ "$module" = stdlib ]; then
+              echo "::error::$osv in the Go standard library, fixed in Go ${fixed#v}"
+              failed=1
+              continue
+            fi
+            severity=unrated
+            if [ -n "$ghsas" ]; then
+              severity=$(gh api "/advisories/${ghsas%%,*}" --jq .severity)
+            fi
+            case $severity in
+              high | critical)
+                echo "::error::$osv ($severity) in $module, fixed in $fixed"
+                failed=1
+                ;;
+              *)
+                echo "::warning::$osv ($severity) in $module, fixed in $fixed"
+                ;;
+            esac
+          done < "$RUNNER_TEMP/findings.tsv"
+          if [ ! -s "$RUNNER_TEMP/findings.tsv" ]; then
+            echo "No vulnerabilities found."
+          fi
+          exit $failed
