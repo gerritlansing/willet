@@ -43,8 +43,43 @@ jobs:
           fi
 
       - run: make test
-      - run: make vuln
       - run: make build
+
+  # Fails on vulnerabilities in the modules willet requires, which a PR can
+  # fix by bumping them. Standard-library vulnerabilities only warn: they need
+  # a Go release, and the daily scan on main fails on them.
+  vuln:
+    name: Vulnerabilities
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Scan with govulncheck
+        run: |
+          go tool govulncheck -format json ./... > "$RUNNER_TEMP/vuln.json"
+          # Symbol-level findings are the ones in code willet calls, which make vuln fails on.
+          jq -r 'select(.finding.trace[0].function) | .finding | [.osv, .trace[0].module, .fixed_version // "no release"] | @tsv' \
+            "$RUNNER_TEMP/vuln.json" | sort -u > "$RUNNER_TEMP/findings.tsv"
+          failed=0
+          while IFS=$'\t' read -r osv module fixed; do
+            if [ "$module" = stdlib ]; then
+              echo "::warning::$osv in the Go standard library, fixed in Go ${fixed#v}"
+            else
+              echo "::error::$osv in $module, fixed in $fixed"
+              failed=1
+            fi
+          done < "$RUNNER_TEMP/findings.tsv"
+          if [ ! -s "$RUNNER_TEMP/findings.tsv" ]; then
+            echo "No vulnerabilities found."
+          fi
+          exit $failed
 
   integration:
     name: Integration
