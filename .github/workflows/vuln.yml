@@ -1,8 +1,8 @@
 name: Vulnerability scan
 
-# Dependabot does not track the Go version in go.mod, so a new standard-library
-# advisory goes unnoticed until the next PR runs make vuln. A daily scan of
-# main surfaces it as a failed run.
+# Dependabot does not track the Go version in go.mod, and the PR scan only warns
+# on standard-library advisories. A daily scan of main surfaces them as a failed
+# run.
 
 on:
   schedule:
