@@ -911,3 +911,104 @@ func TestSchedulableStates(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Drain
+
+func fastDrain(c *Config) { c.DrainPoll = 5 * time.Millisecond }
+
+func TestDrainRemovesIdleAndWaitsForJobs(t *testing.T) {
+	s, prov, client := newTest(t, 0, 3, fastDrain)
+	reconcile(t, s, 3)
+	names := s.names()
+	busy, assigned, free := names[0], names[1], names[2]
+	_ = s.HandleJobStarted(context.Background(), &scaleset.JobStarted{RunnerName: busy})
+	client.setBusy(busy)
+	client.setBusy(assigned) // assigned a job, but its start message hasn't arrived
+
+	done := make(chan error, 1)
+	go func() { done <- s.Drain(context.Background()) }()
+
+	eventually(t, func() bool { return client.wasRemoved(free) && prov.get(free).isDestroyed() })
+	select {
+	case err := <-done:
+		t.Fatalf("Drain returned %v while jobs were running", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	for _, n := range []string{busy, assigned} {
+		if prov.get(n).isDestroyed() {
+			t.Fatalf("%s was destroyed while draining", n)
+		}
+	}
+
+	// The jobs finish: ephemeral runners exit by themselves.
+	prov.get(busy).exit(0)
+	prov.get(assigned).exit(0)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Drain = %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Drain did not return after the jobs finished")
+	}
+	if len(s.names()) != 0 {
+		t.Fatalf("runners left: %v", s.names())
+	}
+}
+
+func TestDrainTimeoutLeavesJobsRunning(t *testing.T) {
+	s, prov, client := newTest(t, 0, 2, fastDrain)
+	reconcile(t, s, 1)
+	name := s.names()[0]
+	_ = s.HandleJobStarted(context.Background(), &scaleset.JobStarted{RunnerName: name})
+	client.setBusy(name)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := s.Drain(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Drain = %v, want deadline exceeded", err)
+	}
+	if prov.get(name).isDestroyed() {
+		t.Fatal("Drain destroyed a running job")
+	}
+}
+
+func TestDrainStartsNoRunners(t *testing.T) {
+	s, prov, _ := newTest(t, 2, 4, fastDrain)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_ = s.Drain(ctx)
+	before := prov.started.Load()
+	if _, err := s.HandleDesiredRunnerCount(context.Background(), 4); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if got := prov.started.Load(); got != before || len(s.names()) != 0 {
+		t.Fatalf("runners started while draining: %d starts, runners %v", got-before, s.names())
+	}
+}
+
+func TestDrainAbortsStartsNotYetRegistered(t *testing.T) {
+	prov := &fakeProv{vms: map[string]*fakeVM{}}
+	client := newFakeClient()
+	s := New(context.Background(), Config{ScaleSetID: 1, NamePrefix: "t", MaxRunners: 4, StartConcurrency: 1, DrainPoll: 5 * time.Millisecond, APITimeout: time.Second}, client, prov, testLogger())
+	prov.gate = make(chan struct{}) // holds the first start in Start, with the slot taken
+	if _, err := s.HandleDesiredRunnerCount(context.Background(), 3); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, func() bool { return prov.started.Load() == 1 })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	_ = s.Drain(ctx)
+	cancel()
+	close(prov.gate)
+
+	eventually(t, func() bool { return len(s.names()) <= 1 })
+	if got := client.jitCount(); got != 1 {
+		t.Fatalf("registered %d runners, want only the one already booting", got)
+	}
+	sctx, scancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer scancel()
+	s.Shutdown(sctx)
+}

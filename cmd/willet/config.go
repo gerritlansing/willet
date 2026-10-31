@@ -34,9 +34,12 @@ type Config struct {
 	DiskMiB        uint32
 	MaxJobDuration time.Duration
 	StartTimeout   time.Duration
-	RunnerUser     string
-	RunnerDir      string
-	SkipWarmup     bool
+	// DrainTimeout bounds how long a stop request waits for running jobs; 0
+	// stops immediately.
+	DrainTimeout time.Duration
+	RunnerUser   string
+	RunnerDir    string
+	SkipWarmup   bool
 
 	ImageRefreshInterval time.Duration
 
@@ -125,6 +128,9 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxJobDuration < 0 {
 		return fmt.Errorf("--max-job-duration must not be negative (got %s); use 0 for no limit", c.MaxJobDuration)
+	}
+	if c.DrainTimeout < 0 {
+		return fmt.Errorf("--drain-timeout must not be negative (got %s); use 0 to stop without waiting for jobs", c.DrainTimeout)
 	}
 	if c.NamePrefix() == "" {
 		return fmt.Errorf("cannot derive a VM name from scale set name %q", c.ScaleSetName)

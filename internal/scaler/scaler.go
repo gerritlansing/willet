@@ -62,6 +62,8 @@ type Config struct {
 	// MaxDestroyAttempts is how often a failed VM destroy is retried before the
 	// scaler gives up. The VM keeps its capacity slot either way. Default 10.
 	MaxDestroyAttempts int
+	// DrainPoll is how often Drain looks for idle runners to remove. Default 5s.
+	DrainPoll time.Duration
 }
 
 func (c *Config) defaults() {
@@ -79,6 +81,9 @@ func (c *Config) defaults() {
 	}
 	if c.MaxDestroyAttempts <= 0 {
 		c.MaxDestroyAttempts = 10
+	}
+	if c.DrainPoll <= 0 {
+		c.DrainPoll = 5 * time.Second
 	}
 }
 
@@ -180,6 +185,8 @@ type Scaler struct {
 	mu      sync.Mutex
 	runners map[string]*runner
 	closing bool
+	// draining stops new runners from being started; see Drain.
+	draining bool
 	// wg tracks background goroutines. Add is only called under mu while
 	// !closing, so it never races with Shutdown's Wait.
 	wg sync.WaitGroup
@@ -213,7 +220,7 @@ func (s *Scaler) HandleDesiredRunnerCount(_ context.Context, assignedJobs int) (
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closing {
+	if s.closing || s.draining {
 		return target, nil
 	}
 
@@ -367,6 +374,63 @@ func (s *Scaler) Shutdown(ctx context.Context) {
 	}
 }
 
+// Drain stops starting runners and waits for the ones that exist to finish
+// their jobs and be torn down. Idle runners are removed as soon as GitHub
+// allows; GitHub refuses to remove one that has been assigned a job, so that
+// runner stays until its job is done. Drain returns nil when no runner is
+// left, or ctx's error if ctx ends first. It destroys nothing that is
+// running; call Shutdown for that.
+//
+// The caller should stop feeding the scaler messages first. Without them
+// nothing reports job completions, so runners are reclaimed when their
+// runner process exits.
+func (s *Scaler) Drain(ctx context.Context) error {
+	s.mu.Lock()
+	s.draining = true
+	s.mu.Unlock()
+
+	t := time.NewTicker(s.cfg.DrainPoll)
+	defer t.Stop()
+	last := -1
+	for {
+		n := s.drainStep()
+		if n == 0 {
+			return nil
+		}
+		if n != last {
+			s.logger.Info("Draining: waiting for runners to finish", slog.Int("runners", n))
+			last = n
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+		}
+	}
+}
+
+// drainStep removes idle runners and retries failed teardowns, and returns
+// how many runners are left.
+func (s *Scaler) drainStep() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing {
+		return len(s.runners)
+	}
+	for _, r := range s.runners {
+		switch {
+		case r.state == stateIdle && r.id != 0:
+			r.beginScaleDown()
+			s.goLocked(func() { s.scaleDown(r) })
+		case r.awaitingRetry(s.cfg.MaxDestroyAttempts):
+			s.logger.Info("Retrying VM destroy", slog.String("runner", r.name), slog.Int("attempt", r.destroyAttempts+1))
+			s.beginReclaimLocked(r)
+			s.goLocked(func() { s.finishReclaim(r) })
+		}
+	}
+	return len(s.runners)
+}
+
 // goLocked runs f in a tracked goroutine. Callers must hold s.mu and must
 // have checked !s.closing.
 func (s *Scaler) goLocked(f func()) {
@@ -437,7 +501,7 @@ func (s *Scaler) start(r *runner) (RunnerVM, bool) {
 	// A slot freeing up and cancellation can race; select picks either. Check
 	// again so a canceled or closing scaler never registers a runner.
 	s.mu.Lock()
-	stopping := s.closing
+	stopping := s.closing || s.draining
 	s.mu.Unlock()
 	if stopping || ctx.Err() != nil {
 		s.forget(r)

@@ -39,6 +39,26 @@ func bounded[T any](parent context.Context, timeout time.Duration, fn func(conte
 	}
 }
 
+// retryUntilClosed makes a close function safe to call from both the drain and
+// the final shutdown: once a call succeeds, later calls do nothing, and
+// until then each call tries again.
+func retryUntilClosed(closeFn func(context.Context) error) func(context.Context) error {
+	var mu sync.Mutex
+	closed := false
+	return func(ctx context.Context) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if closed {
+			return nil
+		}
+		if err := closeFn(ctx); err != nil {
+			return err
+		}
+		closed = true
+		return nil
+	}
+}
+
 // Shutdown runs in three phases under one deadline:
 //
 //  1. quiesce: stop background work that could create VMs (image refresh);
