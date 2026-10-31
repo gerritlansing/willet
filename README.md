@@ -14,7 +14,7 @@ GitHub ──long poll──▶ willet ──runner config──▶ microVM (ghc
 
 - Linux on amd64 or arm64 with KVM (`/dev/kvm`) and glibc 2.34 or later (Ubuntu 22.04, Debian 12, RHEL 9 or newer).
 - To build from source instead: Go 1.27.3 or later, with CGO and a C toolchain.
-- The microsandbox runtime, which the daemon installs into `~/.microsandbox` on first start, next to its image cache. On every start it updates an older runtime there to the version it was built for. It never downgrades a newer one, and it leaves alone a runtime selected with `MSB_PATH`.
+- The microsandbox runtime, which the daemon installs into `~/.microsandbox` on first start, next to its image cache. On every start it updates an older runtime there to the version it was built for. It never downgrades a newer one, and it leaves alone a runtime selected with `MSB_PATH`. microsandbox 0.7.12 and later refuse a runtime home (`~/.microsandbox`, or `MSB_HOME`) with a group- or world-writable directory above it; the service user from [Running as a service](#running-as-a-service) is unaffected, but a home created under `umask 002` needs `chmod g-w`.
 - A GitHub App (recommended) or classic personal access token that can manage self-hosted runners for the target repository or organization. Enterprise-level runners need a classic token, because GitHub Apps can't register them. See [GitHub's docs](https://docs.github.com/en/actions/how-tos/manage-runners/use-actions-runner-controller/authenticate-to-the-api) for the permissions.
 
 ## Quick start
