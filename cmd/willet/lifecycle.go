@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/actions/scaleset/listener"
 )
 
 // shutdownBudget bounds the cleanup that follows a drain, or an immediate
@@ -172,6 +174,27 @@ func (s *shutdownSteps) runStep(ctx context.Context, budget time.Duration, st sh
 		s.logger.Warn("Shutdown step failed", slog.String("step", st.name), slog.String("error", err.Error()))
 	}
 }
+
+// ackClient wraps the session client given to the listener. scaleset v0.5.0's
+// listener acknowledges a handled message with cancellation stripped, so
+// nothing else ties the acknowledgement to a stop request: a stalled one
+// would hold l.Run, and with it the drain and the whole shutdown, until the
+// HTTP retries gave up, even after a second signal. The acknowledgement is
+// tied to life (the force context) and given timeout for the call as a whole,
+// retries and token refresh included.
+type ackClient struct {
+	listener.Client
+	life    context.Context
+	timeout time.Duration
+}
+
+func (c ackClient) DeleteMessage(_ context.Context, messageID int) error {
+	ctx, cancel := context.WithTimeout(c.life, c.timeout)
+	defer cancel()
+	return c.Client.DeleteMessage(ctx, messageID)
+}
+
+var _ listener.Client = ackClient{}
 
 // refreshWorker refreshes the runner image periodically until stopped.
 type refreshWorker struct {

@@ -273,7 +273,7 @@ func run(drain, force context.Context, cfg Config) error {
 		shutdown.add(stopRefreshStep(w.stop))
 	}
 
-	l, err := listener.New(session, listener.Config{
+	l, err := listener.New(ackClient{Client: session, life: force, timeout: ackTimeout}, listener.Config{
 		ScaleSetID: scaleSet.ID,
 		MaxRunners: cfg.MaxRunners,
 		Logger:     logger.WithGroup("listener"),

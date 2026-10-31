@@ -10,6 +10,10 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/actions/scaleset"
+	"github.com/actions/scaleset/listener"
+	"github.com/google/uuid"
 )
 
 var quiet = slog.New(slog.DiscardHandler)
@@ -140,6 +144,104 @@ func TestShutdownPlanLocalTeardownFirst(t *testing.T) {
 				t.Errorf("scale set deleted without --delete-on-exit: %v", events)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The acknowledgement must stay tied to a stop request even though the
+// listener strips cancellation from it.
+
+// ackSession serves one message, then waits. DeleteMessage blocks until its
+// context ends, like a request stalled on a dead connection.
+type ackSession struct {
+	sent      atomic.Bool
+	acking    chan struct{}
+	ackResult chan error
+}
+
+func newAckSession() *ackSession {
+	return &ackSession{acking: make(chan struct{}), ackResult: make(chan error, 1)}
+}
+
+func (s *ackSession) GetMessage(ctx context.Context, _, _ int) (*scaleset.RunnerScaleSetMessage, error) {
+	if s.sent.CompareAndSwap(false, true) {
+		return &scaleset.RunnerScaleSetMessage{MessageID: 1, Statistics: &scaleset.RunnerScaleSetStatistic{}}, nil
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (s *ackSession) DeleteMessage(ctx context.Context, _ int) error {
+	close(s.acking)
+	<-ctx.Done()
+	s.ackResult <- ctx.Err()
+	return ctx.Err()
+}
+
+func (s *ackSession) AcquireJobs(context.Context, []int64) ([]int64, error) { return nil, nil }
+func (s *ackSession) Session() scaleset.RunnerScaleSetSession {
+	return scaleset.RunnerScaleSetSession{SessionID: uuid.New(), Statistics: &scaleset.RunnerScaleSetStatistic{}}
+}
+
+type nopScaler struct{}
+
+func (nopScaler) Scale(context.Context, *scaleset.RunnerScaleSetMessage) error { return nil }
+
+func runListener(t *testing.T, client listener.Client, drain context.Context) <-chan error {
+	t.Helper()
+	l, err := listener.New(client, listener.Config{ScaleSetID: 1, MaxRunners: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- l.Run(drain, nopScaler{}) }()
+	return done
+}
+
+func TestForceStopInterruptsAStalledAcknowledgement(t *testing.T) {
+	session := newAckSession()
+	force, cancelForce := context.WithCancel(context.Background())
+	defer cancelForce()
+	drain, cancelDrain := context.WithCancel(force)
+	defer cancelDrain()
+
+	done := runListener(t, ackClient{Client: session, life: force, timeout: time.Hour}, drain)
+	within(t, 2*time.Second, "the listener to start acknowledging", session.acking)
+
+	// The first signal starts a drain. The listener acks regardless, so a
+	// stalled ack keeps Run from returning.
+	cancelDrain()
+	select {
+	case err := <-done:
+		t.Fatalf("Run returned %v while the acknowledgement was stalled", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// The second signal must get it unstuck.
+	cancelForce()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Run returned nil although its acknowledgement was cut off")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a force stop did not interrupt the stalled acknowledgement")
+	}
+	if err := <-session.ackResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("the acknowledgement's context ended with %v, want canceled", err)
+	}
+}
+
+func TestStalledAcknowledgementHasADeadline(t *testing.T) {
+	session := newAckSession()
+	done := runListener(t, ackClient{Client: session, life: context.Background(), timeout: 50 * time.Millisecond}, context.Background())
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a stalled acknowledgement was never given up on")
+	}
+	if err := <-session.ackResult; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("the acknowledgement's context ended with %v, want a deadline", err)
 	}
 }
 

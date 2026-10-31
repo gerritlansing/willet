@@ -222,12 +222,13 @@ func (c *Config) systemInfo(scaleSetID int) scaleset.SystemInfo {
 }
 
 // Limits on GitHub API calls. The message session inherits them, except that
-// the SDK raises the per-attempt timeout for a long poll. They matter most
-// at shutdown: the listener acknowledges a message without regard to
-// cancellation, so these bound how long a stuck acknowledgement can delay it.
+// the SDK raises the per-attempt timeout for a long poll. Calls the daemon
+// makes pass a context of their own as well; the listener's acknowledgement
+// does not, so ackClient bounds it by ackTimeout.
 const (
 	apiAttemptTimeout = 30 * time.Second
 	apiRetryBudget    = 2 * time.Minute
+	ackTimeout        = 30 * time.Second
 )
 
 func scalesetOptions(logger *slog.Logger) []scaleset.HTTPOption {
