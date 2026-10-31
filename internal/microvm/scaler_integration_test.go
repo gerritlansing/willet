@@ -104,9 +104,13 @@ func TestScalerWithRealVMs(t *testing.T) {
 		return msb.IsKind(err, msb.ErrSandboxNotFound)
 	})
 
-	// Its slot is reused.
-	_, _ = s.HandleDesiredRunnerCount(t.Context(), 5)
-	waitFor("replacement VM", func() bool { return owned() == 2 })
+	// Its slot is reused. The VM can be gone from msb a moment before the
+	// scaler releases its slot, so a reconcile in that window finds the scaler
+	// at capacity. A daemon reconciles on every poll; do the same here.
+	waitFor("replacement VM", func() bool {
+		_, _ = s.HandleDesiredRunnerCount(t.Context(), 5)
+		return owned() == 2
+	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
