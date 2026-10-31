@@ -221,20 +221,40 @@ func (c *Config) systemInfo(scaleSetID int) scaleset.SystemInfo {
 	}
 }
 
+// Limits on GitHub API calls. The message session inherits them, except that
+// the SDK raises the per-attempt timeout for a long poll. They matter most
+// at shutdown: the listener acknowledges a message without regard to
+// cancellation, so these bound how long a stuck acknowledgement can delay it.
+const (
+	apiAttemptTimeout = 30 * time.Second
+	apiRetryBudget    = 2 * time.Minute
+)
+
+func scalesetOptions(logger *slog.Logger) []scaleset.HTTPOption {
+	retry := scaleset.DefaultRetryConfig()
+	retry.MaxElapsed = apiRetryBudget
+	return []scaleset.HTTPOption{
+		scaleset.WithHTTPClient(scaleset.NewHTTPClient(scaleset.HTTPClientConfig{Timeout: apiAttemptTimeout})),
+		scaleset.WithRetry(retry),
+		scaleset.WithLogger(logger),
+	}
+}
+
 // ScalesetClient builds an API client from whichever credentials were given.
-func (c *Config) ScalesetClient() (*scaleset.Client, error) {
+func (c *Config) ScalesetClient(logger *slog.Logger) (*scaleset.Client, error) {
+	opts := scalesetOptions(logger)
 	if c.GitHubApp.Validate() == nil {
 		return scaleset.NewClientWithGitHubApp(scaleset.ClientWithGitHubAppConfig{
 			GitHubConfigURL: c.RegistrationURL,
 			GitHubAppAuth:   c.GitHubApp,
 			SystemInfo:      c.systemInfo(0),
-		})
+		}, opts...)
 	}
 	return scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{
 		GitHubConfigURL:     c.RegistrationURL,
 		PersonalAccessToken: c.Token,
 		SystemInfo:          c.systemInfo(0),
-	})
+	}, opts...)
 }
 
 var logLevels = map[string]slog.Level{

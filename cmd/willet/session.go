@@ -2,24 +2,19 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
-	"strings"
 	"time"
+
+	"github.com/actions/scaleset"
 )
 
 // isSessionConflict reports whether err is GitHub refusing a message session
 // because the scale set already has one. That happens when another host runs
 // the same scale set, or for a while after a daemon crashed without closing
-// its session. scaleset v0.4.0 has no typed error for this, so match the
-// status line it formats and GitHub's message text.
+// its session.
 func isSessionConflict(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, `status="409 Conflict"`) ||
-		strings.Contains(msg, "SessionConflict") ||
-		strings.Contains(msg, "already has an active session")
+	return errors.Is(err, scaleset.ConflictError)
 }
 
 // openSession calls open until it succeeds, fails with something other than a

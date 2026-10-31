@@ -5,19 +5,16 @@ import (
 	"log/slog"
 	"sync"
 	"time"
-
-	"github.com/actions/scaleset"
-	"github.com/actions/scaleset/listener"
 )
 
-// shutdownBudget bounds the whole shutdown. systemd's TimeoutStopSec in the
-// README's unit is 90s, leaving headroom before SIGKILL.
+// shutdownBudget bounds the cleanup that follows a drain, or an immediate
+// stop. The README's TimeoutStopSec adds headroom to --drain-timeout plus this.
 const shutdownBudget = time.Minute
 
 // bounded runs fn with a context that ends when parent ends or timeout
 // passes, and returns as soon as that context ends even if fn does not. fn
 // then keeps running in the background and is abandoned. This is needed for
-// scaleset client calls, which wait on a mutex that ignores contexts.
+// steps that may not honor their context.
 func bounded[T any](parent context.Context, timeout time.Duration, fn func(context.Context) (T, error)) (T, error) {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
@@ -176,38 +173,6 @@ func (s *shutdownSteps) runStep(ctx context.Context, budget time.Duration, st sh
 	}
 }
 
-// lifetimeClient wraps the session client given to the listener. scaleset
-// v0.4.0's listener acknowledges messages and acquires jobs with
-// cancellation stripped, so a stuck call would keep the listener, and with it
-// shutdown, from ever starting. These calls are tied to the daemon's lifetime
-// instead, with a per-call timeout, and abandoned when either ends.
-type lifetimeClient struct {
-	listener.Client
-	life    context.Context
-	timeout time.Duration
-}
-
-func (c lifetimeClient) DeleteMessage(_ context.Context, messageID int) error {
-	_, err := bounded(c.life, c.timeout, func(ctx context.Context) (struct{}, error) {
-		return struct{}{}, c.Client.DeleteMessage(ctx, messageID)
-	})
-	return err
-}
-
-func (c lifetimeClient) AcquireJobs(_ context.Context, requestIDs []int64) ([]int64, error) {
-	return bounded(c.life, c.timeout, func(ctx context.Context) ([]int64, error) {
-		return c.Client.AcquireJobs(ctx, requestIDs)
-	})
-}
-
-// GetMessage long-polls for up to ~50s; it keeps its own context, which the
-// listener does cancel, but is also abandoned when the daemon stops.
-func (c lifetimeClient) GetMessage(ctx context.Context, lastMessageID, maxCapacity int) (*scaleset.RunnerScaleSetMessage, error) {
-	return bounded(ctx, 5*time.Minute, func(ctx context.Context) (*scaleset.RunnerScaleSetMessage, error) {
-		return c.Client.GetMessage(ctx, lastMessageID, maxCapacity)
-	})
-}
-
 // refreshWorker refreshes the runner image periodically until stopped.
 type refreshWorker struct {
 	cancel context.CancelFunc
@@ -252,5 +217,3 @@ func (w *refreshWorker) stop(ctx context.Context) error {
 		return ctx.Err()
 	}
 }
-
-var _ listener.Client = lifetimeClient{}
