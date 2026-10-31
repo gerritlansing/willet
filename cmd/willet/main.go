@@ -76,16 +76,21 @@ the environment, which wins over the env file.`,
 			return cfg.Validate()
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			sigs := make(chan os.Signal, 2)
+			signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+			defer signal.Stop(sigs)
+			drain, force, stop := handleSignals(cmd.Context(), sigs)
 			defer stop()
-			err := run(ctx, cfg)
-			if err != nil && ctx.Err() != nil {
+			err := run(drain, force, cfg)
+			if err != nil && drain.Err() != nil {
 				// Asked to stop: whatever was in flight failed because of that.
 				return nil
 			}
 			return err
 		},
 	}
+
+	cmd.AddCommand(newUpgradeCommand(), newStopCommand(), newTerminateCommand())
 
 	f := cmd.Flags()
 	f.SortFlags = false
@@ -110,6 +115,7 @@ the environment, which wins over the env file.`,
 	f.Uint32Var(&cfg.MemoryMiB, "memory", 4096, "memory per runner VM in MiB")
 	f.Uint32Var(&cfg.DiskMiB, "disk", 0, "writable root disk per runner VM in MiB (0 = runtime default)")
 	f.DurationVar(&cfg.MaxJobDuration, "max-job-duration", 6*time.Hour, "hard cap on a runner VM's lifetime (0 = unlimited)")
+	f.DurationVar(&cfg.DrainTimeout, "drain-timeout", 6*time.Hour, "on SIGTERM or SIGINT, stop taking jobs and wait this long for running jobs to finish before destroying their VMs; a second signal stops immediately (0 = stop immediately)")
 	f.DurationVar(&cfg.StartTimeout, "start-timeout", 10*time.Minute, "limit on creating one VM, including any image pull, and on registering its runner")
 	f.StringVar(&cfg.RunnerUser, "runner-user", "runner", "guest user that runs the runner")
 	f.StringVar(&cfg.RunnerDir, "runner-dir", "/home/runner", "guest directory containing run.sh")
@@ -129,7 +135,12 @@ the environment, which wins over the env file.`,
 	return cmd
 }
 
-func run(ctx context.Context, cfg Config) error {
+// run starts the daemon and returns when it has stopped. The first stop
+// request cancels drain: startup and the listener end, and running jobs get up
+// to cfg.DrainTimeout to finish. The second cancels force: whatever is still
+// running is destroyed now. Jobs, VMs and the scaler live under force.
+func run(drain, force context.Context, cfg Config) error {
+	ctx := drain
 	logger := cfg.Logger()
 	logger.Info("Starting willet", slog.String("version", version), slog.String("commit", commit))
 
@@ -234,7 +245,8 @@ func run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("create message session: %w", err)
 	}
-	shutdown.add(closeSessionStep(session.Close))
+	closeSession := retryUntilClosed(session.Close)
+	shutdown.add(closeSessionStep(closeSession))
 
 	// Only now clean up: the local lock rules out another daemon on this host,
 	// and GitHub has just granted us the scale set's only message session.
@@ -242,7 +254,7 @@ func run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("clean up orphaned VMs: %w", err)
 	}
 
-	s := scaler.New(ctx, scaler.Config{
+	s := scaler.New(force, scaler.Config{
 		ScaleSetID:   scaleSet.ID,
 		NamePrefix:   namePrefix,
 		MinRunners:   cfg.MinRunners,
@@ -261,7 +273,7 @@ func run(ctx context.Context, cfg Config) error {
 		shutdown.add(stopRefreshStep(w.stop))
 	}
 
-	l, err := listener.New(lifetimeClient{Client: session, life: ctx, timeout: 30 * time.Second}, listener.Config{
+	l, err := listener.New(lifetimeClient{Client: session, life: force, timeout: 30 * time.Second}, listener.Config{
 		ScaleSetID: scaleSet.ID,
 		MaxRunners: cfg.MaxRunners,
 		Logger:     logger.WithGroup("listener"),
@@ -279,7 +291,35 @@ func run(ctx context.Context, cfg Config) error {
 	if err := l.Run(ctx, s); err != nil && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("listener: %w", err)
 	}
+	if ctx.Err() != nil && cfg.DrainTimeout > 0 {
+		drainRunners(force, logger, cfg.DrainTimeout, closeSession, s.Drain)
+	}
 	return nil
+}
+
+// drainRunners lets running jobs finish after a stop request. It releases the
+// GitHub session first, so no job is assigned to a daemon that will not run
+// it, then waits until the scaler has no runners left, timeout passes or
+// force ends. Whatever remains is destroyed by the shutdown that follows.
+func drainRunners(force context.Context, logger *slog.Logger, timeout time.Duration,
+	closeSession func(context.Context) error, drain func(context.Context) error) {
+	logger.Info("Stop requested: taking no new jobs and waiting for running jobs to finish",
+		slog.Duration("timeout", timeout), slog.String("hint", "send the signal again to stop now"))
+	if _, err := bounded(force, 30*time.Second, func(ctx context.Context) (struct{}, error) {
+		return struct{}{}, closeSession(ctx)
+	}); err != nil {
+		logger.Warn("Could not close the message session before draining", slog.String("error", err.Error()))
+	}
+	ctx, cancel := context.WithTimeout(force, timeout)
+	defer cancel()
+	switch err := drain(ctx); {
+	case err == nil:
+		logger.Info("Drained: no runners left")
+	case force.Err() != nil:
+		logger.Warn("Second stop request: destroying running jobs now")
+	default:
+		logger.Warn("Drain timeout reached: destroying running jobs", slog.Duration("timeout", timeout))
+	}
 }
 
 // refreshImage pulls the configured image and moves new runners to it.

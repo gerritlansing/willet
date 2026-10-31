@@ -155,8 +155,12 @@ ExecStart=/usr/local/bin/willet
 Restart=always
 # Restart slowly after a failure instead of hitting systemd's start rate limit.
 RestartSec=30
-# The daemon's own shutdown takes at most 60s; this leaves headroom.
-TimeoutStopSec=90
+# On stop, the daemon waits for running jobs (up to WILLET_DRAIN_TIMEOUT, 6h
+# by default), then needs up to 60s to clean up.
+TimeoutStopSec=6h 2min
+# Signal only the daemon on stop. The default would also signal the runner VMs
+# and end the jobs the daemon is waiting for.
+KillMode=mixed
 
 [Install]
 WantedBy=multi-user.target
@@ -168,11 +172,37 @@ sudo systemctl enable --now willet
 sudo journalctl -u willet -f   # wait for "Listening for jobs"
 ```
 
-**Stopping or restarting willet interrupts running jobs:** it destroys every VM rather than waiting for jobs to finish.
+**Stopping or restarting willet waits for running jobs.** On SIGTERM (what `systemctl stop` and `restart` send) or SIGINT, the daemon takes no new jobs and lets running ones finish, up to `WILLET_DRAIN_TIMEOUT` (default 6h, the same as `WILLET_MAX_JOB_DURATION`), then destroys any VMs left and exits. Queued jobs wait on GitHub for the next daemon. A second signal skips the wait and destroys the VMs now. SIGKILL also ends jobs, and leaves cleanup to the next start. With `WILLET_DRAIN_TIMEOUT=0` the daemon stops at once.
+
+```sh
+sudo willet stop        # wait for running jobs, then stay stopped
+sudo willet terminate   # stop now, destroying running jobs
+```
+
+Both wrap `systemctl` (`--service` names a unit other than `willet`). A stop can take as long as the longest job, so a reboot waits too; lower `WILLET_DRAIN_TIMEOUT` and `TimeoutStopSec` to bound it. `willet stop` and `willet upgrade` warn if the unit's `TimeoutStopSec` or `KillMode` would cut a drain short.
 
 - `EnvironmentFile` is read by systemd as root, so `/etc/willet.env` can stay root-owned with mode 600. The daemon itself reads the GitHub App private key file and any registry password file, so the service user must be able to read those.
 - `StateDirectory=` creates `/var/lib/willet` for the single-instance lock.
 - The service user's `~/.microsandbox` holds willet's runtime, images and VMs. When willet updates the runtime, anything else running as that user gets the new version too. To give willet its own runtime under a shared user, set `MSB_HOME` to a directory of its own in `/etc/willet.env`.
+
+### Upgrading
+
+```sh
+sudo willet upgrade
+```
+
+downloads the latest release, checks that its tarball was built by this repository's [release workflow](.github/workflows/release.yml) (the Sigstore build-provenance attestation GitHub stores for it, which a checksum file from the release itself couldn't prove), replaces the binary, and restarts the `willet` systemd service, waiting for running jobs first (see above). It never installs a release it can't verify, and a failure leaves the old binary in place. A daemon from before draining existed stops at once whatever you pass, and a unit file written for it needs `TimeoutStopSec` and `KillMode` updated as shown above. The restarted daemon then updates the microsandbox runtime to the version the new release needs.
+
+| Flag | |
+|---|---|
+| `--check` | only report whether a newer release exists |
+| `--to v1.2.3` | install that release instead of the latest (an older one needs `--force`) |
+| `--no-restart` | install without restarting |
+| `--terminate` | restart at once, destroying running jobs, instead of waiting for them |
+| `--service NAME` | systemd unit to restart (default `willet`); a unit that isn't running is left alone |
+| `--force` | install even if the release isn't newer, or to replace a development build |
+
+Upgrading needs write access to the directory holding the binary, so run it as root for `/usr/local/bin`. It supports the Linux `amd64` and `arm64` builds the releases ship.
 
 ## How it works
 
@@ -180,7 +210,7 @@ sudo journalctl -u willet -f   # wait for "Listening for jobs"
 - **Scaling:** the target is `min(WILLET_MAX_RUNNERS, WILLET_MIN_RUNNERS + assigned jobs)`. For each missing runner, the daemon requests a single-use runner config from GitHub, boots a VM (about 300 ms once the image is cached, plus about a second to start Docker), and starts `run.sh`.
 - **After a job:** the ephemeral runner exits and its VM is destroyed, disk and all. A runner still alive two minutes after its job completed is destroyed anyway. Surplus idle runners are removed.
 - **Failures:** a VM keeps its capacity slot until it is confirmed destroyed, and failed teardowns are retried, so the host is never oversubscribed.
-- **Shutdown** (SIGINT/SIGTERM): the daemon destroys all VMs, deregisters idle runners and closes the GitHub session (with `WILLET_DELETE_ON_EXIT`, it also deletes the scale set), giving up on any step still running after a minute. VMs it couldn't destroy are removed at the next start; GitHub expires runners left behind.
+- **Shutdown** (SIGINT/SIGTERM): the daemon first drains (above). Then it destroys all remaining VMs, deregisters idle runners and closes the GitHub session (with `WILLET_DELETE_ON_EXIT`, it also deletes the scale set), giving up on any step still running after a minute. VMs it couldn't destroy are removed at the next start; GitHub expires runners left behind.
 
 ## Limitations
 

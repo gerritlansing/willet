@@ -77,6 +77,7 @@ func TestInvalidConfigFailsBeforeRun(t *testing.T) {
 		{name: "docker disk too small", args: []string{"--url", "https://github.com/org", "--docker", "--docker-disk", "100"}, wantErr: "--docker-disk"},
 		{name: "negative refresh interval", args: []string{"--url", "https://github.com/org", "--image-refresh-interval", "-1h"}, wantErr: "--image-refresh-interval"},
 		{name: "too frequent refresh", args: []string{"--url", "https://github.com/org", "--image-refresh-interval", "30s"}, wantErr: "at least 1m"},
+		{name: "negative drain timeout", args: []string{"--url", "https://github.com/org", "--drain-timeout", "-1m"}, wantErr: "--drain-timeout must not be negative"},
 		{name: "zero start timeout", args: []string{"--url", "https://github.com/org", "--start-timeout", "0"}, wantErr: "--start-timeout must be positive"},
 		{name: "negative duration env file", args: []string{"--url", "https://github.com/org"}, envFile: "WILLET_MAX_JOB_DURATION=-5s\n", wantErr: "must not be negative"},
 	}
