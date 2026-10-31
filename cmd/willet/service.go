@@ -100,7 +100,27 @@ func (u unit) systemctl(ctx context.Context, args ...string) error {
 	return nil
 }
 
-// running reports whether the unit is active, and says why not otherwise. A
+// state returns the unit's ActiveState: active, activating, deactivating,
+// inactive, failed, and so on.
+func (u unit) state(ctx context.Context) (string, error) {
+	out, err := exec.CommandContext(ctx, "systemctl", "show", "--property=ActiveState", "--value", u.name).Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// alive reports whether the unit has a process that may still be running
+// jobs. A unit that is draining is deactivating, not active, so it counts.
+func alive(state string) bool {
+	switch state {
+	case "active", "activating", "deactivating", "reloading", "refreshing":
+		return true
+	}
+	return false
+}
+
+// running reports whether the daemon is alive, and says why not otherwise. A
 // stopped service is left alone: starting one the operator stopped is not
 // these commands' job.
 func (u unit) running(ctx context.Context) bool {
@@ -108,23 +128,36 @@ func (u unit) running(ctx context.Context) bool {
 		fmt.Fprintln(u.out, "systemctl not found; this command manages a systemd service")
 		return false
 	}
-	if exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", u.name).Run() != nil {
-		fmt.Fprintf(u.out, "Service %s is not running\n", u.name)
+	st, err := u.state(ctx)
+	if err != nil {
+		fmt.Fprintf(u.out, "Cannot read the state of %s: %v\n", u.name, err)
 		return false
+	}
+	if !alive(st) {
+		fmt.Fprintf(u.out, "Service %s is not running (%s)\n", u.name, st)
+		return false
+	}
+	if st == "deactivating" {
+		fmt.Fprintf(u.out, "Service %s is already stopping\n", u.name)
 	}
 	return true
 }
 
 // forceStop queues a stop and then sends the daemon a second signal, which
 // makes it skip the drain. systemd's stop job sends SIGTERM first, so
-// whichever signal arrives first starts the drain and the other ends it.
-// The stop job also keeps Restart=always from starting the daemon again.
+// whichever signal arrives first starts the drain and the other ends it. If
+// a drain is already under way, the signal is the second one. The stop job
+// also keeps Restart=always from starting the daemon again. It returns once
+// both are issued, not when the daemon has stopped.
 func (u unit) forceStop(ctx context.Context) error {
 	if err := u.systemctl(ctx, "stop", "--no-block"); err != nil {
 		return err
 	}
 	if err := exec.CommandContext(ctx, "systemctl", "kill", "--kill-whom=main", "--signal=SIGINT", u.name).Run(); err != nil {
-		fmt.Fprintf(u.out, "Warning: could not signal %s: %v\n", u.name, err)
+		// A daemon that already exited has nothing left to signal.
+		if st, serr := u.state(ctx); serr != nil || alive(st) {
+			fmt.Fprintf(u.out, "Warning: could not signal %s: %v\n", u.name, err)
+		}
 	}
 	return nil
 }
@@ -135,14 +168,19 @@ func (u unit) forceStop(ctx context.Context) error {
 func (u unit) restart(ctx context.Context, force bool) error {
 	u.warnSettings(ctx)
 	if force {
+		// Stop completely before starting, so no signal can reach the new
+		// daemon: a queued restart could start it before the kill ran.
 		fmt.Fprintf(u.out, "Restarting %s now; running jobs are destroyed\n", u.name)
-		if err := u.systemctl(ctx, "restart", "--no-block"); err != nil {
+		if err := u.forceStop(ctx); err != nil {
 			return err
 		}
-		if err := exec.CommandContext(ctx, "systemctl", "kill", "--kill-whom=main", "--signal=SIGINT", u.name).Run(); err != nil {
-			fmt.Fprintf(u.out, "Warning: could not signal %s: %v\n", u.name, err)
+		if err := u.systemctl(ctx, "stop"); err != nil { // waits for the stop to finish
+			return err
 		}
-		fmt.Fprintf(u.out, "Restart queued; systemd starts the new version once %s has stopped\n", u.name)
+		if err := u.systemctl(ctx, "start"); err != nil {
+			return fmt.Errorf("willet was upgraded and %s stopped, but starting it failed: %w", u.name, err)
+		}
+		fmt.Fprintf(u.out, "Restarted %s\n", u.name)
 		return nil
 	}
 	fmt.Fprintf(u.out, "Restarting %s; running jobs finish first. Ctrl-C stops waiting but leaves the restart queued; `willet terminate` forces it.\n", u.name)
