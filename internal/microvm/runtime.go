@@ -77,7 +77,7 @@ func alignRuntime(ctx context.Context, logger *slog.Logger, want string, s runti
 	return rt, nil
 }
 
-// msbVersion runs `msb --version`, which prints e.g. "msb 0.7.7".
+// msbVersion runs `msb --version`, which prints e.g. "msb 0.7.12".
 func msbVersion(ctx context.Context, msbPath string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, runtimeVersionTimeout)
 	defer cancel()

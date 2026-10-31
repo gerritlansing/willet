@@ -47,8 +47,8 @@ func TestAlignRuntime(t *testing.T) {
 		wantInstalled int
 		wantErr       string
 	}{
-		{name: "matching", rt: fakeRuntime{origin: msb.RuntimeOriginHome, version: "0.7.7"}},
-		{name: "older in home is updated", rt: fakeRuntime{origin: msb.RuntimeOriginHome, version: "0.7.3", installs: "0.7.7"}, wantInstalled: 1},
+		{name: "matching", rt: fakeRuntime{origin: msb.RuntimeOriginHome, version: "0.7.12"}},
+		{name: "older in home is updated", rt: fakeRuntime{origin: msb.RuntimeOriginHome, version: "0.7.3", installs: "0.7.12"}, wantInstalled: 1},
 		{name: "newer is never downgraded", rt: fakeRuntime{origin: msb.RuntimeOriginHome, version: "0.8.0"}, wantErr: "upgrade willet"},
 		{name: "unparseable is left alone", rt: fakeRuntime{origin: msb.RuntimeOriginHome, version: "dev"}, wantErr: "upgrade willet"},
 		{name: "explicit runtime is left alone", rt: fakeRuntime{origin: msb.RuntimeOriginEnvironment, version: "0.7.3"}, wantErr: "selected by environment"},
@@ -57,7 +57,7 @@ func TestAlignRuntime(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := alignRuntime(context.Background(), slog.New(slog.DiscardHandler), "0.7.7", c.rt.setup())
+			_, err := alignRuntime(context.Background(), slog.New(slog.DiscardHandler), "0.7.12", c.rt.setup())
 			if c.wantErr == "" && err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -73,9 +73,9 @@ func TestAlignRuntime(t *testing.T) {
 
 func TestMsbVersion(t *testing.T) {
 	cases := map[string]string{
-		"msb 0.7.7\n": "0.7.7",
-		"msb\n":       "",
-		"0.7.7\n":     "",
+		"msb 0.7.12\n": "0.7.12",
+		"msb\n":        "",
+		"0.7.12\n":     "",
 	}
 	for out, want := range cases {
 		path := filepath.Join(t.TempDir(), "msb")

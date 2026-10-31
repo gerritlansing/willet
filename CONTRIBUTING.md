@@ -12,7 +12,7 @@ You need:
 
 - Linux with KVM (`/dev/kvm`) to run the integration tests. Unit tests run anywhere Go runs.
 - Go 1.27.3 or later, with CGO and a C toolchain. With the default `GOTOOLCHAIN=auto`, an older `go` downloads the required version.
-- The microsandbox runtime in `~/.microsandbox`, at the same version as the Go SDK in `go.mod`. The daemon and the integration tests install it, or update an older one, on start.
+- The microsandbox runtime in `~/.microsandbox`, at the same version as the Go SDK in `go.mod`. The daemon and the integration tests install it, or update an older one, on start. microsandbox 0.7.12+ refuses a runtime home with a group- or world-writable directory above it, which `umask 002` (Ubuntu's default for users) produces: run `chmod -R g-w ~/.microsandbox`, or point `MSB_HOME` at a directory you created with mode 700. `MSB_HOME` must also be short: Unix socket paths are limited to 107 bytes.
 
 ```sh
 make build        # bin/willet
