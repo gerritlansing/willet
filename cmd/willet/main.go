@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -219,7 +218,7 @@ func run(drain, force context.Context, cfg Config) error {
 		}
 	}
 
-	client, err := cfg.ScalesetClient()
+	client, err := cfg.ScalesetClient(logger.WithGroup("scaleset"))
 	if err != nil {
 		return fmt.Errorf("create scaleset client: %w", err)
 	}
@@ -260,6 +259,7 @@ func run(drain, force context.Context, cfg Config) error {
 		MinRunners:   cfg.MinRunners,
 		MaxRunners:   cfg.MaxRunners,
 		StartTimeout: cfg.StartTimeout,
+		Jobs:         session,
 	}, client, provisioner{prov}, logger.WithGroup("scaler"))
 	shutdown.add(stopRunnersStep(s.Shutdown))
 
@@ -273,7 +273,7 @@ func run(drain, force context.Context, cfg Config) error {
 		shutdown.add(stopRefreshStep(w.stop))
 	}
 
-	l, err := listener.New(lifetimeClient{Client: session, life: force, timeout: 30 * time.Second}, listener.Config{
+	l, err := listener.New(ackClient{Client: session, life: force, timeout: ackTimeout}, listener.Config{
 		ScaleSetID: scaleSet.ID,
 		MaxRunners: cfg.MaxRunners,
 		Logger:     logger.WithGroup("listener"),
@@ -288,7 +288,9 @@ func run(drain, force context.Context, cfg Config) error {
 		slog.Int("scaleSetID", scaleSet.ID),
 		slog.Any("labels", labelNames(scaleSet.Labels)),
 	)
-	if err := l.Run(ctx, s); err != nil && !errors.Is(err, context.Canceled) {
+	// A stop request ends the listener with a context error, possibly wrapped
+	// by the SDK; any error after one is part of stopping.
+	if err := l.Run(ctx, s); err != nil && ctx.Err() == nil {
 		return fmt.Errorf("listener: %w", err)
 	}
 	if ctx.Err() != nil && cfg.DrainTimeout > 0 {
@@ -305,11 +307,11 @@ func drainRunners(force context.Context, logger *slog.Logger, timeout time.Durat
 	closeSession func(context.Context) error, drain func(context.Context) error) {
 	logger.Info("Stop requested: taking no new jobs and waiting for running jobs to finish",
 		slog.Duration("timeout", timeout), slog.String("hint", "send the signal again to stop now"))
-	if _, err := bounded(force, 30*time.Second, func(ctx context.Context) (struct{}, error) {
-		return struct{}{}, closeSession(ctx)
-	}); err != nil {
+	closeCtx, cancelClose := context.WithTimeout(force, 30*time.Second)
+	if err := closeSession(closeCtx); err != nil {
 		logger.Warn("Could not close the message session before draining", slog.String("error", err.Error()))
 	}
+	cancelClose()
 	ctx, cancel := context.WithTimeout(force, timeout)
 	defer cancel()
 	switch err := drain(ctx); {

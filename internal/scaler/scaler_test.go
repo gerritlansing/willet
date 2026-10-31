@@ -3,8 +3,10 @@ package scaler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -156,11 +158,13 @@ type fakeClient struct {
 	removed map[int64]bool
 	// busy runner IDs cannot be removed, like the real API.
 	busy map[int64]bool
-	jits int
+	// unknown runner IDs are already gone from GitHub.
+	unknown map[int64]bool
+	jits    int
 	// removeBlock makes RemoveRunner wait for ctx to end, like a stalled API.
 	removeBlock bool
 	// removeHang makes RemoveRunner ignore ctx entirely until released, like
-	// a call queued on the scaleset client's non-context-aware mutex.
+	// a call that ignores its context.
 	removeHang chan struct{}
 	// removeCalls counts RemoveRunner calls; removeDeadline records the
 	// deadline of the last one.
@@ -169,7 +173,7 @@ type fakeClient struct {
 }
 
 func newFakeClient() *fakeClient {
-	return &fakeClient{ids: map[string]int64{}, removed: map[int64]bool{}, busy: map[int64]bool{}}
+	return &fakeClient{ids: map[string]int64{}, removed: map[int64]bool{}, busy: map[int64]bool{}, unknown: map[int64]bool{}}
 }
 
 func (c *fakeClient) GenerateJitRunnerConfig(ctx context.Context, s *scaleset.RunnerScaleSetJitRunnerSetting, _ int) (*scaleset.RunnerScaleSetJitRunnerConfig, error) {
@@ -203,10 +207,19 @@ func (c *fakeClient) RemoveRunner(ctx context.Context, id int64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.busy[id] {
-		return errors.New("runner is busy")
+		return fmt.Errorf("DELETE runner %d: %w", id, scaleset.JobStillRunningError)
+	}
+	if c.unknown[id] {
+		return fmt.Errorf("DELETE runner %d: %w", id, scaleset.RunnerNotFoundError)
 	}
 	c.removed[id] = true
 	return nil
+}
+
+func (c *fakeClient) setUnknown(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.unknown[c.ids[name]] = true
 }
 
 func (c *fakeClient) setBusy(name string) {
@@ -661,7 +674,7 @@ func TestShutdownReturnsWhileAPICallIgnoresContext(t *testing.T) {
 	name := s.names()[0]
 
 	// A background deregistration gets stuck on the client, ignoring its
-	// context, like a call queued on scaleset's non-context-aware mutex.
+	// context, like a call that ignores it.
 	hang := make(chan struct{})
 	defer close(hang)
 	client.mu.Lock()
@@ -1011,4 +1024,382 @@ func TestDrainAbortsStartsNotYetRegistered(t *testing.T) {
 	sctx, scancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer scancel()
 	s.Shutdown(sctx)
+}
+
+// ---------------------------------------------------------------------------
+// Scale (listener.Scaler)
+
+type fakeJobs struct {
+	mu    sync.Mutex
+	calls [][]int64
+	err   error
+}
+
+func (f *fakeJobs) AcquireJobs(_ context.Context, ids []int64) ([]int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, append([]int64(nil), ids...))
+	return ids, f.err
+}
+
+func (f *fakeJobs) acquired() [][]int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([][]int64(nil), f.calls...)
+}
+
+func scaleMsg(id, assigned int) *scaleset.RunnerScaleSetMessage {
+	return &scaleset.RunnerScaleSetMessage{MessageID: id, Statistics: &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: assigned}}
+}
+
+func available(ids ...int64) []*scaleset.JobAvailable {
+	var out []*scaleset.JobAvailable
+	for _, id := range ids {
+		out = append(out, &scaleset.JobAvailable{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: id}})
+	}
+	return out
+}
+
+func TestScaleAcquiresJobsThenScales(t *testing.T) {
+	jobs := &fakeJobs{}
+	s, _, _ := newTest(t, 0, 4, func(c *Config) { c.Jobs = jobs })
+
+	msg := scaleMsg(1, 2)
+	msg.JobAvailableMessages = available(10, 11)
+	if err := s.Scale(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+	s.settled(t)
+
+	if got := jobs.acquired(); len(got) != 1 || len(got[0]) != 2 || got[0][0] != 10 || got[0][1] != 11 {
+		t.Fatalf("AcquireJobs calls = %v, want one call with [10 11]", got)
+	}
+	if n := len(s.names()); n != 2 {
+		t.Fatalf("%d runners, want 2", n)
+	}
+}
+
+func TestScaleSkipsAcquireWithoutAvailableJobs(t *testing.T) {
+	jobs := &fakeJobs{}
+	s, _, _ := newTest(t, 0, 4, func(c *Config) { c.Jobs = jobs })
+	if err := s.Scale(context.Background(), scaleMsg(1, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if got := jobs.acquired(); len(got) != 0 {
+		t.Fatalf("AcquireJobs called: %v", got)
+	}
+}
+
+// A failed acquire returns an error, so the listener does not ack and the
+// message comes back; nothing may have been scaled on a half-handled message.
+func TestScaleAcquireFailureStopsBeforeScaling(t *testing.T) {
+	jobs := &fakeJobs{err: errors.New("503")}
+	s, prov, _ := newTest(t, 0, 4, func(c *Config) { c.Jobs = jobs })
+
+	msg := scaleMsg(1, 3)
+	msg.JobAvailableMessages = available(10)
+	if err := s.Scale(context.Background(), msg); err == nil {
+		t.Fatal("want the acquire error")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if prov.started.Load() != 0 || len(s.names()) != 0 {
+		t.Fatal("runners started although the message was not handled")
+	}
+
+	// Redelivery of the same message succeeds and scales.
+	jobs.mu.Lock()
+	jobs.err = nil
+	jobs.mu.Unlock()
+	if err := s.Scale(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+	s.settled(t)
+	if n := len(s.names()); n != 3 {
+		t.Fatalf("%d runners after redelivery, want 3", n)
+	}
+}
+
+func TestScaleOfferedJobsWithoutAcquirerIsAnError(t *testing.T) {
+	s, _, _ := newTest(t, 0, 4)
+	msg := scaleMsg(1, 1)
+	msg.JobAvailableMessages = available(10)
+	if err := s.Scale(context.Background(), msg); err == nil {
+		t.Fatal("jobs offered but no way to acquire them must not be silently dropped")
+	}
+}
+
+func TestScaleAppliesStartedAndCompleted(t *testing.T) {
+	s, prov, _ := newTest(t, 0, 4)
+	if err := s.Scale(context.Background(), scaleMsg(1, 2)); err != nil {
+		t.Fatal(err)
+	}
+	s.settled(t)
+	names := s.names()
+	started, done := names[0], names[1]
+
+	msg := scaleMsg(2, 2)
+	msg.JobStartedMessages = []*scaleset.JobStarted{{RunnerName: started}}
+	msg.JobCompletedMessages = []*scaleset.JobCompleted{{RunnerName: done}}
+	if err := s.Scale(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := s.stateOf(started); st != stateBusy {
+		t.Fatalf("started runner state = %d, want busy", st)
+	}
+	prov.get(done).exit(0) // the ephemeral runner exits after its job
+	eventually(t, func() bool { _, ok := s.stateOf(done); return !ok })
+}
+
+// A poll that returns nothing is a nil message. The scaler reconciles against
+// the statistics it last saw, which also retries failed teardowns.
+func TestScaleNilMessageReconcilesAgainstLastStatistics(t *testing.T) {
+	s, prov, _ := newTest(t, 0, 4)
+	if err := s.Scale(context.Background(), scaleMsg(1, 2)); err != nil {
+		t.Fatal(err)
+	}
+	s.settled(t)
+	victim := s.names()[0]
+	prov.get(victim).exit(1) // crashes; the slot is reclaimed
+	eventually(t, func() bool { _, ok := s.stateOf(victim); return !ok })
+
+	if err := s.Scale(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	s.settled(t)
+	if n := len(s.names()); n != 2 {
+		t.Fatalf("%d runners after a nil poll, want 2 again", n)
+	}
+}
+
+func TestScaleInitialMessageSetsStatistics(t *testing.T) {
+	s, _, _ := newTest(t, 1, 4)
+	if err := s.Scale(context.Background(), scaleMsg(listener.InitialMessageID, 2)); err != nil {
+		t.Fatal(err)
+	}
+	s.settled(t)
+	if n := len(s.names()); n != 3 {
+		t.Fatalf("%d runners, want min 1 + 2 assigned = 3", n)
+	}
+}
+
+func TestScaleStatisticsAbsentKeepsPrevious(t *testing.T) {
+	s, _, _ := newTest(t, 0, 4)
+	if err := s.Scale(context.Background(), scaleMsg(1, 2)); err != nil {
+		t.Fatal(err)
+	}
+	s.settled(t)
+	if err := s.Scale(context.Background(), &scaleset.RunnerScaleSetMessage{MessageID: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(s.names()); n != 2 {
+		t.Fatalf("%d runners, want the earlier statistics kept (2)", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Typed errors from RemoveRunner
+
+func TestScaleDownTreatsUnknownRunnerAsRemoved(t *testing.T) {
+	s, prov, client := newTest(t, 0, 2)
+	reconcile(t, s, 1)
+	name := s.names()[0]
+	client.setUnknown(name)
+
+	reconcile(t, s, 0)
+	eventually(t, func() bool { return len(s.names()) == 0 })
+	if !prov.get(name).isDestroyed() {
+		t.Fatal("VM of a runner GitHub no longer knows was not destroyed")
+	}
+}
+
+// logRecorder collects log messages at warning level or above.
+type logRecorder struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (r *logRecorder) logger() *slog.Logger {
+	return slog.New(&recordHandler{record: func(rec slog.Record) {
+		if rec.Level >= slog.LevelWarn {
+			r.mu.Lock()
+			r.msgs = append(r.msgs, rec.Message)
+			r.mu.Unlock()
+		}
+	}})
+}
+
+func (r *logRecorder) has(msg string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Contains(r.msgs, msg)
+}
+
+func (r *logRecorder) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.msgs)
+}
+
+func TestScaleDownKeepsRunnerWithJobAndLogsItQuietly(t *testing.T) {
+	var rec logRecorder
+	s, prov, client := newTestLogging(t, rec.logger(), 0, 2)
+	reconcile(t, s, 1)
+	name := s.names()[0]
+	client.setBusy(name)
+
+	reconcile(t, s, 0)
+	eventually(t, func() bool { st, _ := s.stateOf(name); return st == stateIdle })
+	if prov.get(name).isDestroyed() {
+		t.Fatal("runner with an assigned job was destroyed")
+	}
+	if n := rec.count(); n != 0 {
+		t.Fatalf("a runner that has a job is expected, not a warning; got %d warnings: %v", n, rec.msgs)
+	}
+}
+
+func TestScaleDownWarnsOnUnexpectedRemoveFailure(t *testing.T) {
+	var rec logRecorder
+	s, _, client := newTestLogging(t, rec.logger(), 0, 2, func(c *Config) { c.APITimeout = 20 * time.Millisecond })
+	reconcile(t, s, 1)
+	client.mu.Lock()
+	client.removeBlock = true // RemoveRunner fails with a context error
+	client.mu.Unlock()
+
+	reconcile(t, s, 0)
+	eventually(t, func() bool { return rec.has("Could not remove idle runner") })
+}
+
+// ---------------------------------------------------------------------------
+// The real listener driving the scaler
+
+// scriptedSession is a listener.Client that serves queued messages, then
+// nil polls until its context ends, and records what the listener does.
+type scriptedSession struct {
+	mu       sync.Mutex
+	messages []*scaleset.RunnerScaleSetMessage
+	events   []string
+	polls    chan struct{} // receives after each poll
+}
+
+func (c *scriptedSession) record(e string) {
+	c.mu.Lock()
+	c.events = append(c.events, e)
+	c.mu.Unlock()
+}
+
+func (c *scriptedSession) log() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.events...)
+}
+
+func (c *scriptedSession) GetMessage(ctx context.Context, _, _ int) (*scaleset.RunnerScaleSetMessage, error) {
+	c.mu.Lock()
+	var m *scaleset.RunnerScaleSetMessage
+	if len(c.messages) > 0 {
+		m, c.messages = c.messages[0], c.messages[1:]
+	}
+	c.mu.Unlock()
+	if m == nil {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(5 * time.Millisecond): // a poll that timed out empty
+		}
+	}
+	select {
+	case c.polls <- struct{}{}:
+	default:
+	}
+	return m, nil
+}
+
+func (c *scriptedSession) DeleteMessage(_ context.Context, id int) error {
+	c.record(fmt.Sprintf("delete %d", id))
+	return nil
+}
+
+func (c *scriptedSession) AcquireJobs(_ context.Context, ids []int64) ([]int64, error) {
+	c.record(fmt.Sprintf("acquire %v", ids))
+	return ids, nil
+}
+
+func (c *scriptedSession) Session() scaleset.RunnerScaleSetSession {
+	return scaleset.RunnerScaleSetSession{SessionID: uuid.New(), Statistics: &scaleset.RunnerScaleSetStatistic{}}
+}
+
+func TestListenerAcquiresThenScalesThenAcks(t *testing.T) {
+	sess := &scriptedSession{polls: make(chan struct{}, 100)}
+	first := scaleMsg(1, 2)
+	first.JobAvailableMessages = available(10, 11)
+	sess.messages = []*scaleset.RunnerScaleSetMessage{first}
+
+	s, _, _ := newTest(t, 0, 4, func(c *Config) { c.Jobs = sess })
+	l, err := listener.New(sess, listener.Config{ScaleSetID: 1, MaxRunners: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- l.Run(ctx, s) }()
+
+	eventually(t, func() bool { return slices.Contains(sess.log(), "delete 1") })
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context canceled", err)
+	}
+	if got := sess.log(); len(got) != 2 || got[0] != "acquire [10 11]" || got[1] != "delete 1" {
+		t.Fatalf("events = %v, want acquire before delete", got)
+	}
+	s.settled(t)
+	if n := len(s.names()); n != 2 {
+		t.Fatalf("%d runners, want 2", n)
+	}
+}
+
+// A message whose handling fails is not acked, so the service redelivers it.
+func TestListenerDoesNotAckAFailedMessage(t *testing.T) {
+	sess := &scriptedSession{polls: make(chan struct{}, 100)}
+	msg := scaleMsg(1, 1)
+	msg.JobAvailableMessages = available(10)
+	sess.messages = []*scaleset.RunnerScaleSetMessage{msg}
+
+	failing := &fakeJobs{err: errors.New("503")}
+	s, _, _ := newTest(t, 0, 4, func(c *Config) { c.Jobs = failing })
+	l, err := listener.New(sess, listener.Config{ScaleSetID: 1, MaxRunners: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = l.Run(context.Background(), s)
+	if err == nil || !strings.Contains(err.Error(), "acquire jobs") {
+		t.Fatalf("Run = %v, want the acquire failure", err)
+	}
+	if got := sess.log(); len(got) != 0 {
+		t.Fatalf("listener acked a message that failed: %v", got)
+	}
+}
+
+// Empty polls keep the scaler converging on the last statistics, so a slot
+// freed by a crashed runner is refilled without any new message.
+func TestListenerNilPollsKeepReconciling(t *testing.T) {
+	sess := &scriptedSession{polls: make(chan struct{}, 100)}
+	sess.messages = []*scaleset.RunnerScaleSetMessage{scaleMsg(1, 1)}
+
+	s, prov, _ := newTest(t, 0, 4)
+	l, err := listener.New(sess, listener.Config{ScaleSetID: 1, MaxRunners: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = l.Run(ctx, s) }()
+
+	eventually(t, func() bool { return len(s.names()) == 1 })
+	s.settled(t)
+	first := s.names()[0]
+	prov.get(first).exit(1)
+	eventually(t, func() bool {
+		names := s.names()
+		return len(names) == 1 && names[0] != first
+	})
 }

@@ -23,7 +23,7 @@ func TestBoundedAbandonsCallsThatIgnoreContext(t *testing.T) {
 	defer close(release)
 	begin := time.Now()
 	_, err := bounded(context.Background(), 50*time.Millisecond, func(context.Context) (int, error) {
-		<-release // like a call queued on scaleset's mutex
+		<-release // a call that ignores its context
 		return 1, nil
 	})
 	if !errors.Is(err, context.DeadlineExceeded) || time.Since(begin) > time.Second {
@@ -148,16 +148,22 @@ func TestShutdownPlanLocalTeardownFirst(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// R05: a stuck message acknowledgement must not keep the listener, and with
-// it shutdown, from starting.
+// The acknowledgement must stay tied to a stop request even though the
+// listener strips cancellation from it.
 
-type stuckSession struct {
-	release chan struct{}
-	sent    atomic.Bool
-	acked   atomic.Bool
+// ackSession serves one message, then waits. DeleteMessage blocks until its
+// context ends, like a request stalled on a dead connection.
+type ackSession struct {
+	sent      atomic.Bool
+	acking    chan struct{}
+	ackResult chan error
 }
 
-func (s *stuckSession) GetMessage(ctx context.Context, _, _ int) (*scaleset.RunnerScaleSetMessage, error) {
+func newAckSession() *ackSession {
+	return &ackSession{acking: make(chan struct{}), ackResult: make(chan error, 1)}
+}
+
+func (s *ackSession) GetMessage(ctx context.Context, _, _ int) (*scaleset.RunnerScaleSetMessage, error) {
 	if s.sent.CompareAndSwap(false, true) {
 		return &scaleset.RunnerScaleSetMessage{MessageID: 1, Statistics: &scaleset.RunnerScaleSetStatistic{}}, nil
 	}
@@ -165,110 +171,78 @@ func (s *stuckSession) GetMessage(ctx context.Context, _, _ int) (*scaleset.Runn
 	return nil, ctx.Err()
 }
 
-// DeleteMessage ignores its context entirely, like a call waiting on the
-// scaleset client's mutex.
-func (s *stuckSession) DeleteMessage(context.Context, int) error {
-	s.acked.Store(true)
-	<-s.release
-	return nil
+func (s *ackSession) DeleteMessage(ctx context.Context, _ int) error {
+	close(s.acking)
+	<-ctx.Done()
+	s.ackResult <- ctx.Err()
+	return ctx.Err()
 }
 
-func (s *stuckSession) AcquireJobs(context.Context, []int64) ([]int64, error) { return nil, nil }
-func (s *stuckSession) Session() scaleset.RunnerScaleSetSession {
+func (s *ackSession) AcquireJobs(context.Context, []int64) ([]int64, error) { return nil, nil }
+func (s *ackSession) Session() scaleset.RunnerScaleSetSession {
 	return scaleset.RunnerScaleSetSession{SessionID: uuid.New(), Statistics: &scaleset.RunnerScaleSetStatistic{}}
 }
 
 type nopScaler struct{}
 
-func (nopScaler) HandleJobStarted(context.Context, *scaleset.JobStarted) error     { return nil }
-func (nopScaler) HandleJobCompleted(context.Context, *scaleset.JobCompleted) error { return nil }
-func (nopScaler) HandleDesiredRunnerCount(_ context.Context, n int) (int, error)   { return n, nil }
+func (nopScaler) Scale(context.Context, *scaleset.RunnerScaleSetMessage) error { return nil }
 
-func TestListenerReturnsDespiteStuckAcknowledgement(t *testing.T) {
-	session := &stuckSession{release: make(chan struct{})}
-	defer close(session.release)
-	life, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	l, err := listener.New(lifetimeClient{Client: session, life: life, timeout: time.Hour}, listener.Config{ScaleSetID: 1, MaxRunners: 1})
+func runListener(t *testing.T, client listener.Client, drain context.Context) <-chan error {
+	t.Helper()
+	l, err := listener.New(client, listener.Config{ScaleSetID: 1, MaxRunners: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- l.Run(life, nopScaler{}) }()
+	go func() { done <- l.Run(drain, nopScaler{}) }()
+	return done
+}
 
-	waitFor(t, 2*time.Second, "listener to acknowledge the message", session.acked.Load)
+func TestForceStopInterruptsAStalledAcknowledgement(t *testing.T) {
+	session := newAckSession()
+	force, cancelForce := context.WithCancel(context.Background())
+	defer cancelForce()
+	drain, cancelDrain := context.WithCancel(force)
+	defer cancelDrain()
 
-	cancel() // SIGTERM while the acknowledgement is stuck
+	done := runListener(t, ackClient{Client: session, life: force, timeout: time.Hour}, drain)
+	within(t, 2*time.Second, "the listener to start acknowledging", session.acking)
+
+	// The first signal starts a drain. The listener acks regardless, so a
+	// stalled ack keeps Run from returning.
+	cancelDrain()
+	select {
+	case err := <-done:
+		t.Fatalf("Run returned %v while the acknowledgement was stalled", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// The second signal must get it unstuck.
+	cancelForce()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Run returned nil although its acknowledgement was cut off")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a force stop did not interrupt the stalled acknowledgement")
+	}
+	if err := <-session.ackResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("the acknowledgement's context ended with %v, want canceled", err)
+	}
+}
+
+func TestStalledAcknowledgementHasADeadline(t *testing.T) {
+	session := newAckSession()
+	done := runListener(t, ackClient{Client: session, life: context.Background(), timeout: 50 * time.Millisecond}, context.Background())
 	select {
 	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("listener did not return while an acknowledgement was stuck; shutdown would never start")
+	case <-time.After(2 * time.Second):
+		t.Fatal("a stalled acknowledgement was never given up on")
 	}
-}
-
-// Without the wrapper the pinned listener stays blocked on a stuck
-// acknowledgement: this documents why lifetimeClient exists. If a scaleset
-// upgrade fixes that, the test logs a note rather than failing, since the
-// wrapper stays harmless. Both outcomes must terminate (review finding M01).
-func TestUnwrappedListenerOnStuckAcknowledgement(t *testing.T) {
-	t.Run("pinned SDK blocks", func(t *testing.T) {
-		returnedEarly := runUnwrappedListener(t, &stuckSession{release: make(chan struct{})})
-		if returnedEarly {
-			t.Log("the listener now honours cancellation for acknowledgements; lifetimeClient may no longer be needed")
-		}
-	})
-	t.Run("fixed SDK returns promptly", func(t *testing.T) {
-		// Simulates an SDK that no longer blocks: the acknowledgement
-		// completes, so the listener's next long poll sees the cancellation.
-		s := &stuckSession{release: make(chan struct{})}
-		close(s.release)
-		if !runUnwrappedListener(t, s) {
-			t.Fatal("listener did not return promptly although nothing was stuck")
-		}
-	})
-}
-
-// runUnwrappedListener runs the pinned listener directly on session, cancels
-// it once the message is being acknowledged, and reports whether it returned
-// before the acknowledgement was released. It always waits for the listener
-// to finish, within a bound.
-func runUnwrappedListener(t *testing.T, session *stuckSession) (returnedEarly bool) {
-	t.Helper()
-	var releaseOnce sync.Once
-	release := func() {
-		releaseOnce.Do(func() {
-			select {
-			case <-session.release:
-			default:
-				close(session.release)
-			}
-		})
+	if err := <-session.ackResult; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("the acknowledgement's context ended with %v, want a deadline", err)
 	}
-	t.Cleanup(release)
-
-	life, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	l, err := listener.New(session, listener.Config{ScaleSetID: 1, MaxRunners: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		_ = l.Run(life, nopScaler{})
-	}()
-
-	waitFor(t, 2*time.Second, "listener to acknowledge the message", session.acked.Load)
-	cancel()
-	select {
-	case <-finished:
-		returnedEarly = true
-	case <-time.After(200 * time.Millisecond):
-	}
-	release()
-	within(t, 2*time.Second, "listener to return after the acknowledgement was released", finished)
-	return returnedEarly
 }
 
 // waitFor polls cond until it holds, failing the test after limit.

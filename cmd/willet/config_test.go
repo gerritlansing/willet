@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -163,5 +164,12 @@ func TestValidLoggingSettings(t *testing.T) {
 		if err := cmd.Execute(); err != nil || !ran {
 			t.Errorf("%s/%s: err=%v ran=%v", c.level, c.format, err, ran)
 		}
+	}
+}
+
+func TestScalesetClientBuildsWithOptions(t *testing.T) {
+	cfg := Config{RegistrationURL: "https://github.com/org", Token: "ghp_synthetic"}
+	if c, err := cfg.ScalesetClient(slog.New(slog.DiscardHandler)); err != nil || c == nil {
+		t.Fatalf("ScalesetClient: %v", err)
 	}
 }

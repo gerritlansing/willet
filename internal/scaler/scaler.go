@@ -4,10 +4,12 @@ package scaler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/actions/scaleset"
@@ -40,6 +42,13 @@ type Client interface {
 	RemoveRunner(ctx context.Context, runnerID int64) error
 }
 
+// JobAcquirer claims available jobs for this scale set. It is the message
+// session client, whose AcquireJobs belongs to the session the messages came
+// from.
+type JobAcquirer interface {
+	AcquireJobs(ctx context.Context, requestIDs []int64) ([]int64, error)
+}
+
 // Config configures a Scaler.
 type Config struct {
 	ScaleSetID int
@@ -64,6 +73,9 @@ type Config struct {
 	MaxDestroyAttempts int
 	// DrainPoll is how often Drain looks for idle runners to remove. Default 5s.
 	DrainPoll time.Duration
+	// Jobs acquires the jobs that scale set messages announce. Required to
+	// handle messages with Scale.
+	Jobs JobAcquirer
 }
 
 func (c *Config) defaults() {
@@ -187,6 +199,9 @@ type Scaler struct {
 	closing bool
 	// draining stops new runners from being started; see Drain.
 	draining bool
+	// assigned is the latest TotalAssignedJobs from a message. Scale
+	// reconciles against it when a poll returns nothing.
+	assigned atomic.Int64
 	// wg tracks background goroutines. Add is only called under mu while
 	// !closing, so it never races with Shutdown's Wait.
 	wg sync.WaitGroup
@@ -209,6 +224,58 @@ func New(ctx context.Context, cfg Config, client Client, prov Provisioner, logge
 		sem:     make(chan struct{}, cfg.StartConcurrency),
 		runners: make(map[string]*runner),
 	}
+}
+
+// Scale handles one poll of the scale set message queue. The listener acks
+// the message only if Scale returns nil, so a failure redelivers it; every
+// step is idempotent for that reason. In order, Scale acquires the jobs
+// the message offers, applies job started and completed events, and
+// reconciles the runner count against the latest assigned-job statistics.
+// Those are remembered, because a poll that times out with nothing to report
+// arrives as a nil message and must still retry failed teardowns and keep the
+// count converging. The initial message carries only statistics.
+func (s *Scaler) Scale(ctx context.Context, msg *scaleset.RunnerScaleSetMessage) error {
+	if msg != nil {
+		if len(msg.JobAvailableMessages) > 0 {
+			if err := s.acquire(ctx, msg.JobAvailableMessages); err != nil {
+				return err
+			}
+		}
+		for _, j := range msg.JobStartedMessages {
+			if err := s.HandleJobStarted(ctx, j); err != nil {
+				return fmt.Errorf("handle job started: %w", err)
+			}
+		}
+		for _, j := range msg.JobCompletedMessages {
+			if err := s.HandleJobCompleted(ctx, j); err != nil {
+				return fmt.Errorf("handle job completed: %w", err)
+			}
+		}
+		if msg.Statistics != nil {
+			s.assigned.Store(int64(msg.Statistics.TotalAssignedJobs))
+		}
+	}
+	if _, err := s.HandleDesiredRunnerCount(ctx, int(s.assigned.Load())); err != nil {
+		return fmt.Errorf("reconcile runners: %w", err)
+	}
+	return nil
+}
+
+func (s *Scaler) acquire(ctx context.Context, available []*scaleset.JobAvailable) error {
+	if s.cfg.Jobs == nil {
+		return errors.New("scale set offered jobs, but the scaler has no way to acquire them")
+	}
+	ids := make([]int64, 0, len(available))
+	for _, j := range available {
+		ids = append(ids, j.RunnerRequestID)
+	}
+	s.logger.Info("Acquiring jobs", slog.Int("count", len(ids)))
+	acquired, err := s.cfg.Jobs.AcquireJobs(ctx, ids)
+	if err != nil {
+		return fmt.Errorf("acquire jobs: %w", err)
+	}
+	s.logger.Info("Jobs acquired", slog.Int("count", len(acquired)))
+	return nil
 }
 
 // HandleDesiredRunnerCount converges on min(maxRunners, minRunners+assignedJobs)
@@ -579,11 +646,17 @@ func (s *Scaler) scaleDown(r *runner) {
 	err := s.client.RemoveRunner(ctx, r.id)
 	cancel()
 
+	// A runner GitHub no longer knows is as good as removed.
+	removed := err == nil || errors.Is(err, scaleset.RunnerNotFoundError)
 	s.mu.Lock()
-	r.endScaleDown(err == nil)
-	if err != nil {
+	r.endScaleDown(removed)
+	if !removed {
 		s.mu.Unlock()
-		s.logger.Debug("Idle runner not removable, probably assigned a job", slog.String("runner", r.name), slog.String("error", err.Error()))
+		if errors.Is(err, scaleset.JobStillRunningError) {
+			s.logger.Debug("Idle runner has been assigned a job; keeping it", slog.String("runner", r.name))
+		} else {
+			s.logger.Warn("Could not remove idle runner", slog.String("runner", r.name), slog.String("error", err.Error()))
+		}
 		return
 	}
 	s.mu.Unlock()
@@ -662,7 +735,7 @@ func (s *Scaler) deregister(parent context.Context, r *runner) {
 	if ctx.Err() != nil {
 		return
 	}
-	if err := s.client.RemoveRunner(ctx, id); err != nil {
+	if err := s.client.RemoveRunner(ctx, id); err != nil && !errors.Is(err, scaleset.RunnerNotFoundError) {
 		s.logger.Debug("Could not deregister runner", slog.String("runner", r.name), slog.String("error", err.Error()))
 		return
 	}
